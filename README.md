@@ -1,3 +1,12 @@
+pScript is a Tiny Fast Scripting language for macOS terminal (or anywhere Swift can be compiled — so it should be able to compile on Linux and Windows with the Swift Toolchain). 
+
+pScript is the direct descendant of parseEval.swift — a Recursive Descent Parser written by Robert Purves in 2000 in FutureBasic (a language he wrote in C++). pScript comes full circle to honour Robert's legacy of wisdom and mentoring guidance. thank you robert — your code and thoughts still run. RIP 🙏🏻 
+
+pScript is also the core which powers pTerm — a macOS Terminal programme that supports XModem, and pBasic — a superset of pScript which includes commands for CRT Terminal, TIMER multi-threading, Graphics, and Sound. i plan to release pTerm on the macOS app store sometime in 2026.
+
+[original parseEval ReadMe included here for continuity and completeness]
+
+
 // parseEval.swift version 3.0 by John Roland Penner ©2025
 // A Recursive Parser based on Robert Purves
 // FutureBasic Recursive Descent Parser Demo (2000)

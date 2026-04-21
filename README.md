@@ -367,15 +367,21 @@ Bool is 0/1. No constants (CONST) — use VAR.
 
 • Control Flow • 
 
-IF — Single line only, no multi-line IF {} blocks! 
+IF — both Single and Multi line IF are supported. 
+Single Line IF - THEN: 
 	
 	if x > 0 then y = 1
 	if x > 0 && y > 0 then doSomething()
 	if a$ == "ESC" then end
 
-Limitation: No ELSE. 
-No multi-line IF { } (Milestone 32 pending). 
-Workaround: use sentinel variables and multiple IF checks. 
+Multi Line IF (condition) { } 
+
+	IF (condition) { 
+		one Statement per Line
+		another Statement
+		and another Statement
+	}
+
 
 FOR / NEXT
 	
@@ -395,7 +401,7 @@ WHILE
 
 Condition must be in parentheses. 
 Opening { on same line as while. 
-No BREAK yet (Milestone pending) — use sentinel variable to exit. 
+No BREAK — use sentinel variable to exit. 
 
 
 • Functions • 

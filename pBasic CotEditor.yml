@@ -1,0 +1,166 @@
+attributes:
+- beginString: anyfile
+  ignoreCase: true
+characters:
+- beginString: \$
+  regularExpression: true
+commands:
+- beginString: ABS
+  ignoreCase: true
+- beginString: ASC
+  ignoreCase: true
+- beginString: ATAN
+  ignoreCase: true
+- beginString: BEEP
+  ignoreCase: true
+- beginString: BUFFER
+  ignoreCase: true
+- beginString: CHR$
+  ignoreCase: true
+- beginString: CLR
+  ignoreCase: true
+- beginString: CLS
+  ignoreCase: true
+- beginString: COS
+  ignoreCase: true
+- beginString: DATE
+  ignoreCase: true
+- beginString: EXP
+  ignoreCase: true
+- beginString: INKEY$
+  ignoreCase: true
+- beginString: INT
+  ignoreCase: true
+- beginString: LEN
+  ignoreCase: true
+- beginString: LINE
+  ignoreCase: true
+- beginString: LOAD
+  ignoreCase: true
+- beginString: LOCATE
+  ignoreCase: true
+- beginString: LOG
+  ignoreCase: true
+- beginString: LOG10
+  ignoreCase: true
+- beginString: MID$
+  ignoreCase: true
+- beginString: PEN
+  ignoreCase: true
+- beginString: PI
+  ignoreCase: true
+- beginString: POINT
+  ignoreCase: true
+- beginString: RND
+  ignoreCase: true
+- beginString: SAVE
+  ignoreCase: true
+- beginString: SAY
+  ignoreCase: true
+- beginString: SIN
+  ignoreCase: true
+- beginString: SQR
+  ignoreCase: true
+- beginString: SQRT
+  ignoreCase: true
+- beginString: STR$
+  ignoreCase: true
+- beginString: TAN
+  ignoreCase: true
+- beginString: TIME
+  ignoreCase: true
+- beginString: TIMER
+  ignoreCase: true
+- beginString: TIMEROFF
+  ignoreCase: true
+- beginString: TIMERON
+  ignoreCase: true
+- beginString: TIMERSTOP
+  ignoreCase: true
+- beginString: VAL
+  ignoreCase: true
+- beginString: VERSION$
+  ignoreCase: true
+- beginString: π
+  ignoreCase: true
+commentDelimiters:
+  inlineDelimiter: //
+comments:
+- beginString: //
+  regularExpression: true
+completions: []
+extensions:
+- keyString: bas
+filenames: []
+interpreters: []
+keywords:
+- beginString: buffer
+  ignoreCase: true
+- beginString: clr
+  ignoreCase: true
+- beginString: cls
+  ignoreCase: true
+- beginString: end
+  ignoreCase: true
+- beginString: for
+  ignoreCase: true
+- beginString: func
+  ignoreCase: true
+- beginString: if
+  ignoreCase: true
+- beginString: line
+  ignoreCase: true
+- beginString: locate
+  ignoreCase: true
+- beginString: next
+  ignoreCase: true
+- beginString: pen
+  ignoreCase: true
+- beginString: point
+  ignoreCase: true
+- beginString: print
+  ignoreCase: true
+- beginString: return
+  ignoreCase: true
+- beginString: then
+  ignoreCase: true
+- beginString: timer
+  ignoreCase: true
+- beginString: timeroff
+  ignoreCase: true
+- beginString: timeron
+  ignoreCase: true
+- beginString: var
+  ignoreCase: true
+- beginString: while
+  ignoreCase: true
+kind: code
+metadata:
+  author: Grok (adapted from Xcode theme)
+  description: pBASIC syntax highlighting for CotEditor using John Penner's Xcode
+    colour theme
+  lastModified: '2026-03-31'
+  version: '1.0'
+numbers:
+- beginString: \b(\d+\.?\d*|\.\d+)(e[-+]\d+)?\b
+  ignoreCase: true
+  regularExpression: true
+outlineMenu: []
+strings:
+- beginString: '"'
+  endString: '"'
+types:
+- beginString: Bool
+  ignoreCase: true
+- beginString: Float
+  ignoreCase: true
+- beginString: Int
+  ignoreCase: true
+- beginString: String
+  ignoreCase: true
+values:
+- beginString: 'false'
+  ignoreCase: true
+- beginString: 'true'
+  ignoreCase: true
+variables: []

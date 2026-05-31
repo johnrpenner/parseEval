@@ -1,6 +1,6 @@
-// pScript 0.8.40 • Copyright 2026 by John Roland Penner
+// pScript 0.9.59 • Copyright 2026 by John Roland Penner
 // Based on a Recursive Descent Parser based by Robert Purves (2008)
-// Released April 19, 2026
+// Released May 31, 2026
 
 	Look, a computer needs Instructions. 
 	Put things in its memory, 
@@ -586,11 +586,6 @@ Cannot call `END` directly from timer — set a flag and check it.
 Need		Workaround
 			
 No ELSE		Two if statements with complementary conditions
-
-No BREAK in WHILE
-			Instead of 'BREAK', set result variable, 
-			and use sentinel to skip remaining iterations. 
-			e.g. IF exitCond then loopRun = 0  //sentinel
 
 
 //--| Recursive Descent Parser |-----//

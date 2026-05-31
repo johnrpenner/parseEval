@@ -1,26 +1,34 @@
 // parseEval.swift
-// pScript v0.8.40 - Copyright 2026 by John Roland Penner
+// pScript v0.9.59 - Copyright 2026 by John Roland Penner
 // Based on Recursive Descent Parser by Robert Purves (2008)
-// Last Updated: April 19, 2026
+// Last Updated: May 29, 2026
 // 
 // Milestone 8: FUNCTIONS | func definitions, local scope, return values, recursion
 // Milestone 12: TIMER with INKEY$
-// Milestone 13: WHILE
+// Milestone 13: WHILE { }
 // Milestone 14: INKEY$ within TIMER
 // Milestone 21: Double-Buffering Graphics Redraw
 // Milestone 23: Multi-Dimensional Arrays
 // Milestone 24: Logical Operators && || ^^ ! 
 // Milestone 25: VAL(str) CHR$(num) ASC(str)
-// Milestone 30: SPRITE() and FUNC() in timerON()
+// Milestone 30: SPRITE() and FUNC() in timerOn()
 // Milestone 33: PLAY Sound command: PLAY(id, volume[, urlString])
 // Milestone 34: TEXT command: TEXT(r,g,b,a) colour of TEXT Foreground
 // Milestone 35: FILL command: FILL(r,g,b,a) colour of TEXT Background
 // Milestone 36: MOUSEAT(); Error Reporting in CLI; and User Guide PDF.
 // Milestone 37: MOD % Operator
 // Milestone 38: DIST(x1,y1,x2,y2) with hypot() = 1.75× faster than pBasic SQRT()
-// Milestone 39: Multi-Line IF { }
-// Milestone 40: MORE for DIR HELP and LIST
-
+// Milestone 39: Multi-Line IF { } with BREAK
+// Milestone 40: Paged output for DIR HELP and LIST
+// Milestone 48: Circle Rect RoundRect
+// Milestone 49: STAMP()
+// Milestone 50: FLOOD()
+// Milestone 51: CLONE()
+// Milestone 52: MEOW
+// Milestone 53: pBasic User Guide PDF
+// Milestone 54: About Dialogue
+// Milestone 58: Functions Pass multi-dimensional Arrays (by Reference)
+// Milestone 59: TERM ON|OFF and SerialIN SerialOut Commands
 
 /*
 
@@ -60,7 +68,7 @@ import Foundation
 import AVFoundation
 
 // Milestone 22: Version string — update only after full test/validate cycle
-let pScriptVersion: String = "pScript 0.8.40 • ©2026 by John Roland Penner"
+let pScriptVersion: String = "pScript 0.9.59 • ©2026 by John Roland Penner"
 
 //---| GLOBALS |-------
 
@@ -217,6 +225,26 @@ enum evalOPcodes: Int {
 	case _ifBeginOpCode			// Milestone 39: IF ( cond ) { — jump past } if false
 	case _ifEndOpCode			// Milestone 39: } closing an IF block — no-op
 	case _distOpCode			// Milestone 38: DIST(x1,y1,x2,y2) Hypotenuse = sqrt((x2-x1)² + (y2-y1)²)
+	case _breakOpCode			// Milestone 39b: BREAK = exit innermost WHILE or IF block
+	case _stringNOpCode			// Milestone 42: STRING$(n, a$) = repeat string n times
+	case _instrOpCode			// Milestone 43: INSTR(startAt, haystack$, needle$)
+	case _sortOpCode			// Milestone 44: SORT [-rev] array[]
+	case _sortLenOpCode			// Milestone 45: SORTLEN [-rev] array[]
+	case _lenArrayOpCode		// Milestone 42b: LEN(array[]) — counts used String elements (i.e. not "")
+	case _circleOpCode			// Milestone 46: CIRCLE(x, y, radius)
+	case _rectOpCode			// Milestone 47: RECT(x1, y1, x2, y2)
+	case _roundRectOpCode		// Milestone 48: ROUNDRECT(x1, y1, x2, y2, cornerRadius)
+	case _stampOpCode			// Milestone 49: STAMP(x, y, spriteID)
+	case _floodOpCode			// Milestone 50: FLOOD(x, y, R,G,B,A) — MacPaint Bucket Flood Fill originating at x,y. 
+	case _meowOpCode			// Milestone 52: MEOW — like a Cat! 
+	case _cloneOpCode			// Milestone 51: CLONE(ID, x1,y1,x2,y2) — Copies canvas Pixels to Sprite ID
+	case _arrayRefOpCode		// Milestone 58: Functions() pass Multi-Dimensional Arrays
+	case _returnArrayOpCode		// Milestone 58: Functions() return Multi-Dimensional Arrays
+	case _arrayReturnAssignOpCode
+	case _termOnOpCode			// Milestone 59: Term SerialIn SerialOut
+	case _termOffOpCode
+	case _serialOutOpCode
+	case _serialInOpCode
 }
 
 // Symbol Table
@@ -597,8 +625,8 @@ struct FunctionDef {
 // on RETURN we can inject the return value and continue mid-expression.
 struct CallFrame {
 	var funcName: String
-	var localVariables: [String: VariableInfo]   // Local variable storage
-	var localTypes: [String: VarType]             // Local type declarations
+	var localVariables: [String: VariableInfo]     // Local variable storage
+	var localTypes: [String: VarType]              // Local type declarations
 	// Saved calling-line execution state (restored on RETURN)
 	var returnPC: Int                              // Line index of the call site
 	var returnIndex: Int                           // Opcode index to resume (just after _funcCallOpCode block)
@@ -611,6 +639,7 @@ struct CallFrame {
 	// Milestone 10: While-loop stack saved per frame (so nested functions don't
 	// corrupt outer WHILE loops — each call frame gets a clean WHILE stack)
 	var savedWhileLoopStack: [WhileLoopInfo]
+	var arrayParamMap: [String: String]   			// local param name → caller's global array name
 }
 
 // Global function definition table (populated during pre-scan)
@@ -631,6 +660,8 @@ var gCurrentParseLineNum: Int = 0
 
 // Call stack (grows with each function call, shrinks on return)
 var gCallStack: [CallFrame] = []
+
+var gLastReturnedArrayName: String = ""
 
 // Sentinel used in the return-value double slot to signal a string return
 let _returnStringMarker: Double = 5.55555555e99
@@ -660,6 +691,24 @@ var gWhileEnds:  [Int: Int] = [:]
 // Milestone 39: MULTI-LINE IF { } Pairs
 var gIfPairs: [Int: Int] = [:]
 var gIfEnds:  [Int: Int] = [:]
+
+
+// Milestone 44/45: in-place sort helper.
+// Preserves "" sentinel entries at the tail (used by LOAD for empty slots).
+// Non-empty entries are sorted; "" entries are collected and appended after.
+func pbasicSortStringArray(_ arr: inout [String], reversed: Bool) {
+	let nonEmpty = arr.filter { !$0.isEmpty }
+	let empties  = arr.filter {  $0.isEmpty }
+	let sorted   = nonEmpty.sorted { reversed ? $0 > $1 : $0 < $1 }
+	arr = sorted + empties
+}
+
+func pbasicSortStringArrayByLength(_ arr: inout [String], reversed: Bool) {
+	let nonEmpty = arr.filter { !$0.isEmpty }
+	let empties  = arr.filter {  $0.isEmpty }
+	let sorted   = nonEmpty.sorted { reversed ? $0.count > $1.count : $0.count < $1.count }
+	arr = sorted + empties
+}
 
 
 //---| MILESTONE 5: TIMER STATE |-------
@@ -701,7 +750,8 @@ var gBreakRequested: Bool = false
 /// Text editor used by the EDIT command.
 /// Set to the .app name without extension — macOS `open -a` handles the rest.
 /// Future: move to pTerm.app preferences panel.
-let gEditorApp: String = "CotEditor"
+//var gEditorApp: String = "CotEditor"
+var gEditorApp: String = UserDefaults.standard.string(forKey: "pBasic.editorApp") ?? "CotEditor"
 
 /// Path of the most recently LOADed file.
 /// Set by the LOAD command in processReplCommand().
@@ -1193,6 +1243,17 @@ func timerOn(delegate: PScriptDelegate?) -> Bool {
 						let tErrE = "Timer Error: Array index \(asIdx) out of bounds for \(asVn)"
 						print(tErrE); interp.delegate?.pscriptPrint(tErrE, newline: true)
 					}
+					
+				case ._arrayRefOpCode:
+					// Array pass-by-reference not supported in timer callbacks.
+					// Skip the varNameIdx operand and leave stack unchanged.
+					execIndex += 1
+
+				case ._arrayReturnAssignOpCode:
+					// Array return assignment not supported in timer callbacks.
+					// Skip the destNameIdx operand and clear gLastReturnedArrayName.
+					execIndex += 1
+					gLastReturnedArrayName = ""
 
 				case ._printOpCode:
 					execIndex += 1
@@ -1435,7 +1496,27 @@ func timerOn(delegate: PScriptDelegate?) -> Bool {
 					else if lv == _stringVarMarker { len = gVariables[gVarNames[execStrVar[execLevel]]]?.value.toString().count ?? 0 }
 					else { len = (lv==floor(lv) ? String(Int(lv)) : String(format:"%.6g",lv)).count }
 					execStack[execLevel] = Double(len)
-
+				
+				// Milestone 42b: LEN(array[]) — timer callback
+				case ._lenArrayOpCode:
+					execIndex += 1
+					let tLenArrNameIdx = codeArray[execIndex]
+					let tLenArrName    = gVarNames[tLenArrNameIdx]
+					var tLenArrResult  = 0
+					gVariablesLock.lock()
+					if let arr = gStringArrays[tLenArrName] {
+						tLenArrResult = arr.filter { !$0.isEmpty }.count
+					} else if let arr = gIntArrays[tLenArrName] {
+						tLenArrResult = arr.count
+					} else if let arr = gFloatArrays[tLenArrName] {
+						tLenArrResult = arr.count
+					} else if let arr = gBoolArrays[tLenArrName] {
+						tLenArrResult = arr.count
+					}
+					gVariablesLock.unlock()
+					execLevel += 1
+					execStack[execLevel] = Double(tLenArrResult)
+				
 				// Milestone 10: WHILE inside timer function body
 				case ._whileOpCode:
 					let cond = execStack[execLevel]; execLevel -= 1
@@ -1566,7 +1647,85 @@ func timerOn(delegate: PScriptDelegate?) -> Bool {
 					let tdX1 = execStack[execLevel];     execLevel -= 1
 					execLevel += 1
 					execStack[execLevel] = hypot(tdX2 - tdX1, tdY2 - tdY1)
+				
+				// Milestone 46: CIRCLE — timer callback
+				case ._circleOpCode:
+					let tCircRadius = Int(execStack[execLevel]);     execLevel -= 1
+					let tCircY      = Int(execStack[execLevel]);     execLevel -= 1
+					let tCircX      = Int(execStack[execLevel]);     execLevel -= 1
+					let (tfr, tfg, tfb, tfa) = gFillColor
+					let (ttr, ttg, ttb, tta) = gTextColor
+					interp.delegate?.pscriptCircle(x: tCircX, y: tCircY, radius: tCircRadius,
+									   fillR: tfr, fillG: tfg, fillB: tfb, fillA: tfa,
+									   strokeR: ttr, strokeG: ttg, strokeB: ttb, strokeA: tta,
+									   penSize: gPenSize)
+				
+				// Milestone 47: RECT — timer callback
+				case ._rectOpCode:
+					let tRectY2 = Int(execStack[execLevel]);     execLevel -= 1
+					let tRectX2 = Int(execStack[execLevel]);     execLevel -= 1
+					let tRectY1 = Int(execStack[execLevel]);     execLevel -= 1
+					let tRectX1 = Int(execStack[execLevel]);     execLevel -= 1
+					let (tfr, tfg, tfb, tfa) = gFillColor
+					let (ttr, ttg, ttb, tta) = gTextColor
+					interp.delegate?.pscriptRect(x1: tRectX1, y1: tRectY1, x2: tRectX2, y2: tRectY2,
+									 fillR: tfr, fillG: tfg, fillB: tfb, fillA: tfa,
+									 strokeR: ttr, strokeG: ttg, strokeB: ttb, strokeA: tta,
+									 penSize: gPenSize)
 
+				// Milestone 48: ROUNDRECT — timer callback
+				case ._roundRectOpCode:
+					let tRRRadius = Int(execStack[execLevel]);     execLevel -= 1
+					let tRRY2     = Int(execStack[execLevel]);     execLevel -= 1
+					let tRRX2     = Int(execStack[execLevel]);     execLevel -= 1
+					let tRRY1     = Int(execStack[execLevel]);     execLevel -= 1
+					let tRRX1     = Int(execStack[execLevel]);     execLevel -= 1
+					let (tfr, tfg, tfb, tfa) = gFillColor
+					let (ttr, ttg, ttb, tta) = gTextColor
+					interp.delegate?.pscriptRoundRect(x1: tRRX1, y1: tRRY1, x2: tRRX2, y2: tRRY2,
+									  radius: tRRRadius,
+									  fillR: tfr, fillG: tfg, fillB: tfb, fillA: tfa,
+									  strokeR: ttr, strokeG: ttg, strokeB: ttb, strokeA: tta,
+									  penSize: gPenSize)
+				
+				// Milestone 49: STAMP — timer callback
+				case ._stampOpCode:
+					let tStampID = Int(execStack[execLevel]);     execLevel -= 1
+					let tStampY  = Int(execStack[execLevel]);     execLevel -= 1
+					let tStampX  = Int(execStack[execLevel]);     execLevel -= 1
+					interp.delegate?.pscriptStamp(x: tStampX, y: tStampY, spriteID: tStampID)
+				
+				// Milestone 51: CLONE — timer callback
+				case ._cloneOpCode:
+					execIndex += 1
+					let _ = codeArray[execIndex]               // argCount
+					let tCloneY2 = Int(execStack[execLevel]); execLevel -= 1
+					let tCloneX2 = Int(execStack[execLevel]); execLevel -= 1
+					let tCloneY1 = Int(execStack[execLevel]); execLevel -= 1
+					let tCloneX1 = Int(execStack[execLevel]); execLevel -= 1
+					let tCloneID = Int(execStack[execLevel]); execLevel -= 1
+					interp.delegate?.pscriptClone(id: tCloneID, x1: tCloneX1, y1: tCloneY1,
+												  x2: tCloneX2, y2: tCloneY2)
+					
+				// Milestone 50: FLOOD — timer callback
+				case ._floodOpCode:
+					let tFloodA = execStack[execLevel];         execLevel -= 1
+					let tFloodB = execStack[execLevel];         execLevel -= 1
+					let tFloodG = execStack[execLevel];         execLevel -= 1
+					let tFloodR = execStack[execLevel];         execLevel -= 1
+					let tFloodY = Int(execStack[execLevel]);    execLevel -= 1
+					let tFloodX = Int(execStack[execLevel]);    execLevel -= 1
+					let tfr = min(max(tFloodR, 0.0), 1.0)
+					let tfg = min(max(tFloodG, 0.0), 1.0)
+					let tfb = min(max(tFloodB, 0.0), 1.0)
+					let tfa = min(max(tFloodA, 0.0), 1.0)
+					interp.delegate?.pscriptFlood(x: tFloodX, y: tFloodY,
+												  r: tfr, g: tfg, b: tfb, a: tfa)
+				
+				// Milestone 52: MEOW — timer callback
+				case ._meowOpCode:
+					interp.delegate?.pscriptMeow()
+				
 				// Milestone 28: SAY inside timer callback
 				case ._sayOpCode:
 					let tSayRaw = execStack[execLevel]
@@ -1589,6 +1748,107 @@ func timerOn(delegate: PScriptDelegate?) -> Bool {
 					execLevel -= 1
 					if let d = interp.delegate { d.pscriptSay(tSayText) }
 					else { print("[SAY] \(tSayText)") }
+				
+				// Milestone 42: STRING$(n, string) — Repeat string for length n
+				case ._stringNOpCode:
+					execIndex += 1  // consume argCount (2)
+					let tSnRaw = execStack[execLevel]
+					var tSnPattern = ""
+					if tSnRaw == _stringConstMarker {
+						tSnPattern = gStringConstants[execStrConst[execLevel]]
+					} else if tSnRaw == _stringVarMarker {
+						let vi = execStrVar[execLevel]
+						if vi == _tempArrayStringVarIndex { tSnPattern = gTempStringForArray }
+						else { let vn = gVarNames[vi]; gVariablesLock.lock(); if let inf = gVariables[vn], case .string(let s) = inf.value { tSnPattern = s }; gVariablesLock.unlock() }
+					}
+					execLevel -= 1
+					let tSnCount = max(0, min(1024, Int(execStack[execLevel])))
+					execLevel -= 1
+					var tSnResult = ""
+					if !tSnPattern.isEmpty && tSnCount > 0 {
+						while tSnResult.count < tSnCount { tSnResult += tSnPattern }
+						tSnResult = String(tSnResult.prefix(tSnCount))
+					}
+					let tSnSI = interp.storeStringConst(value: tSnResult)
+					execLevel += 1
+					execStack[execLevel] = _stringConstMarker
+					execStrConst[execLevel] = tSnSI
+					
+				// Milestone 43: INSTR — timer callback
+				case ._instrOpCode:
+					execIndex += 1  // consume argCount (3)
+
+					let tInstrNeedleRaw = execStack[execLevel]
+					var tInstrNeedle = ""
+					if tInstrNeedleRaw == _stringConstMarker {
+						tInstrNeedle = gStringConstants[execStrConst[execLevel]]
+					} else if tInstrNeedleRaw == _stringVarMarker {
+						let vi = execStrVar[execLevel]
+						if vi == _tempArrayStringVarIndex { tInstrNeedle = gTempStringForArray }
+						else { let vn = gVarNames[vi]; gVariablesLock.lock(); if let inf = gVariables[vn], case .string(let s) = inf.value { tInstrNeedle = s }; gVariablesLock.unlock() }
+					}
+					execLevel -= 1
+
+					let tInstrHayRaw = execStack[execLevel]
+					var tInstrHay = ""
+					if tInstrHayRaw == _stringConstMarker {
+						tInstrHay = gStringConstants[execStrConst[execLevel]]
+					} else if tInstrHayRaw == _stringVarMarker {
+						let vi = execStrVar[execLevel]
+						if vi == _tempArrayStringVarIndex { tInstrHay = gTempStringForArray }
+						else { let vn = gVarNames[vi]; gVariablesLock.lock(); if let inf = gVariables[vn], case .string(let s) = inf.value { tInstrHay = s }; gVariablesLock.unlock() }
+					}
+					execLevel -= 1
+
+					let tInstrStart = Int(execStack[execLevel])
+					execLevel -= 1
+
+					var tInstrResult = -1
+					if !tInstrNeedle.isEmpty && tInstrStart >= 0 && tInstrStart < tInstrHay.count {
+						let startIdx = tInstrHay.index(tInstrHay.startIndex, offsetBy: tInstrStart)
+						if let found = tInstrHay.range(of: tInstrNeedle, range: startIdx..<tInstrHay.endIndex) {
+							tInstrResult = tInstrHay.distance(from: tInstrHay.startIndex, to: found.lowerBound)
+						}
+					}
+					execLevel += 1
+					execStack[execLevel] = Double(tInstrResult)
+				
+				// Milestone 44: SORT — timer callback
+				case ._sortOpCode:
+					execIndex += 1; let tSortNameIdx  = codeArray[execIndex]
+					execIndex += 1; let tSortReversed = codeArray[execIndex] != 0
+					let tSortName = gVarNames[tSortNameIdx]
+					gVariablesLock.lock()
+					let tSortVT = gVariableTypes[tSortName]
+					gVariablesLock.unlock()
+					guard let tSortVT else { break }
+					gVariablesLock.lock()
+					switch tSortVT {
+					case .stringArrayType:
+						if var arr = gStringArrays[tSortName] {
+							pbasicSortStringArray(&arr, reversed: tSortReversed)
+							gStringArrays[tSortName] = arr
+						}
+					case .intArrayType:
+						gIntArrays[tSortName]?.sort { tSortReversed ? $0 > $1 : $0 < $1 }
+					case .floatArrayType:
+						gFloatArrays[tSortName]?.sort { tSortReversed ? $0 > $1 : $0 < $1 }
+					default: break
+					}
+					gVariablesLock.unlock()
+
+				// Milestone 45: SORTLEN — timer callback
+				case ._sortLenOpCode:
+					execIndex += 1; let tSlNameIdx  = codeArray[execIndex]
+					execIndex += 1; let tSlReversed = codeArray[execIndex] != 0
+					let tSlName = gVarNames[tSlNameIdx]
+					gVariablesLock.lock()
+					let tSlVT = gVariableTypes[tSlName]
+					if tSlVT == .stringArrayType, var arr = gStringArrays[tSlName] {
+						pbasicSortStringArrayByLength(&arr, reversed: tSlReversed)
+						gStringArrays[tSlName] = arr
+					}
+					gVariablesLock.unlock()
 				
 				// Milestone 28: SAY STOP inside timer callback — key use case:
 				// timer fires, checks INKEY$, if ESC → SAY STOP to halt long utterance
@@ -1614,6 +1874,10 @@ func timerOn(delegate: PScriptDelegate?) -> Bool {
 							else if vi >= 1 { let vn=gVarNames[vi]; gVariablesLock.lock(); if let inf=gVariables[vn],case .string(let s)=inf.value{tPlayURLStr=s}; gVariablesLock.unlock() }
 						}
 						execLevel -= 1
+					}
+					// Apply path resolution to sound file URL
+					if !tPlayURLStr.isEmpty {
+						tPlayURLStr = resolveBasPath(tPlayURLStr).path
 					}
 					if (tPlayMask >> 1) & 1 == 1 {
 						tPlayVolume = execStack[execLevel]; execLevel -= 1
@@ -1705,7 +1969,11 @@ func timerOn(delegate: PScriptDelegate?) -> Bool {
 						if vi == _tempArrayStringVarIndex { tSprURL = gTempStringForArray }
 						else if vi >= 1 { let vn = gVarNames[vi]; gVariablesLock.lock(); if let inf = gVariables[vn], case .string(let s) = inf.value { tSprURL = s }; gVariablesLock.unlock() }
 					}
-
+					// Apply path resolution — emoji (@🛸) and empty strings pass through unchanged
+					if !tSprURL.isEmpty && !tSprURL.hasPrefix("@") {
+						tSprURL = resolveBasPath(tSprURL).path
+					}
+					
 					let tSprID      = Int(tSlotVal[0])
 					let tSprX       = tSlotVal[1]
 					let tSprY       = tSlotVal[2]
@@ -1863,7 +2131,63 @@ func timerOn(delegate: PScriptDelegate?) -> Bool {
 				case ._timerOffOpCode:
 					timerOff()
 					break bodyLoop
+				
+				case ._termOnOpCode:
+					interp.delegate?.pscriptSerialConnect()
 
+				case ._termOffOpCode:
+					interp.delegate?.pscriptSerialDisconnect()
+
+				case ._serialOutOpCode:
+					execIndex += 1
+					let soMode = codeArray[execIndex]
+					if soMode == 0 {
+						interp.delegate?.pscriptSerialOut("", newline: true)
+					} else {
+						let soVal = execStack[execLevel]; execLevel -= 1
+						var soText = ""
+						if soVal == _stringConstMarker {
+							soText = gStringConstants[execStrConst[execLevel + 1]]
+						} else if soVal == _stringVarMarker {
+							let si = execStrVar[execLevel + 1]
+							if si == _tempArrayStringVarIndex { soText = gTempStringForArray }
+							else if si >= 1 {
+								gVariablesLock.lock()
+								let sv = gVariables[gVarNames[si]]?.value
+								gVariablesLock.unlock()
+								soText = sv?.toString() ?? ""
+							}
+						} else if soVal == floor(soVal) && abs(soVal) < Double(Int.max) {
+							soText = String(Int(soVal))
+						} else {
+							soText = String(format: "%.6g", soVal)
+						}
+						interp.delegate?.pscriptSerialOut(soText, newline: soMode == 1)
+					}
+
+				case ._serialInOpCode:
+					execIndex += 1
+					let siVarNameIdx = codeArray[execIndex]
+					let siVarName = gVarNames[siVarNameIdx]
+					let siLine = interp.delegate?.pscriptSerialIn() ?? ""
+					if gBreakRequested { break bodyLoop }
+					gVariablesLock.lock()
+					let siVT = gVariableTypes[siVarName]
+					gVariablesLock.unlock()
+					if let vt = siVT {
+						let siValue: Value
+						switch vt {
+						case .stringType: siValue = .string(siLine)
+						case .intType:    siValue = .int(Int(siLine) ?? 0)
+						case .floatType:  siValue = .float(Double(siLine) ?? 0.0)
+						case .boolType:   siValue = .bool(!siLine.isEmpty && siLine != "0")
+						default:          siValue = .string(siLine)
+						}
+						gVariablesLock.lock()
+						gVariables[siVarName] = VariableInfo(type: vt, value: siValue)
+						gVariablesLock.unlock()
+					}	
+				
 				case ._varDeclOpCode:
 					// VAR declarations inside timer callback functions are not supported.
 					// The declaration emits an initialiser value onto the stack that
@@ -2082,9 +2406,45 @@ protocol PScriptDelegate: AnyObject {
 	/// TEXT command — set persistent text foreground colour for subsequent PRINT output.
 	/// r, g, b, a in 0.0–1.0. Default is phosphor green (0, 0.91, 0.23, 1.0).
 	func pscriptTextColor(r: Double, g: Double, b: Double, a: Double)
+	// Milestone 46: CIRCLE(x, y, radius)
+	func pscriptCircle(x: Int, y: Int, radius: Int,
+					 fillR: Double, fillG: Double, fillB: Double, fillA: Double,
+					 strokeR: Double, strokeG: Double, strokeB: Double, strokeA: Double, penSize: Double)
+	// Milestone 47: RECT(x1, y1, x2, y2)
+	func pscriptRect(x1: Int, y1: Int, x2: Int, y2: Int,
+					 fillR: Double, fillG: Double, fillB: Double, fillA: Double,
+					 strokeR: Double, strokeG: Double, strokeB: Double, strokeA: Double, penSize: Double)
+	// Milestone 48: ROUNDRECT(x1, y1, x2, y2, cornerRadius)
+	func pscriptRoundRect(x1: Int, y1: Int, x2: Int, y2: Int, radius: Int,
+					  fillR: Double, fillG: Double, fillB: Double, fillA: Double,
+					  strokeR: Double, strokeG: Double, strokeB: Double, strokeA: Double, penSize: Double)
+	/// Milestone 49: Bake sprite texture onto canvas at pBasic coordinates.
+	func pscriptStamp(x: Int, y: Int, spriteID: Int)
+	/// Milestone 50: Scanline flood fill from seed point in pBasic canvas coords.
+	func pscriptFlood(x: Int, y: Int, r: Double, g: Double, b: Double, a: Double)
+	/// Milestone 52: Play a random meow WAV from the app bundle.
+	func pscriptMeow()
+	/// Milestone 51: Capture canvas region and assign as sprite texture.
+	/// Creates sprite if it doesn't exist (hidden=1, rotation=0, scale=1, alpha=1).
+	func pscriptClone(id: Int, x1: Int, y1: Int, x2: Int, y2: Int)
 	/// Milestone 40: MORE pager — erase the pause prompt line synchronously.
 	/// Called on the pScript background thread after the user presses Space.
 	/// Must complete before any further output is enqueued.
+	/// TERM ON — connect the serial port.
+	func pscriptSerialConnect()
+
+	/// TERM OFF — disconnect the serial port.
+	func pscriptSerialDisconnect()
+
+	/// SERIALOUT — send text over the serial port.
+	/// newline: true appends CR+LF, false sends text as-is.
+	func pscriptSerialOut(_ text: String, newline: Bool)
+
+	/// SERIALIN — block the pScript background thread until a complete
+	/// line arrives from the serial port (terminated by CR or LF).
+	/// Returns the line with line-ending characters stripped.
+	func pscriptSerialIn() -> String
+	
 	func pscriptErasePromptLine(width: Int)
 	func pscriptPrintSync(_ text: String)
 	/// To manage Timer
@@ -2236,6 +2596,10 @@ class parseEval: NSObject {
 		addToSymTable(opStr: "CHR$", type: ._unaryOpType, opcode: ._CHRopCode)
 		addToSymTable(opStr: "ASC",  type: ._unaryOpType, opcode: ._ASCopCode)
 		addToSymTable(opStr: "STR$", type: ._unaryOpType, opcode: ._STRopCode)
+		addToSymTable(opStr: "STRING$", type: ._unaryOpType, opcode: ._stringNOpCode)
+		addToSymTable(opStr: "INSTR", type: ._unaryOpType, opcode: ._instrOpCode)
+		addToSymTable(opStr: "SORT", type: ._keywordType, opcode: ._sortOpCode)
+		addToSymTable(opStr: "SORTLEN", type: ._keywordType, opcode: ._sortLenOpCode)
 		
 		addToSymTable(opStr: "VAR", type: ._keywordType, opcode: ._varDeclOpCode)
 		addToSymTable(opStr: "LET", type: ._keywordType, opcode: ._noOpCode)
@@ -2266,6 +2630,13 @@ class parseEval: NSObject {
 		addToSymTable(opStr: "CLR",    type: ._keywordType, opcode: ._clrOpCode)
 		addToSymTable(opStr: "LINE",   type: ._keywordType, opcode: ._lineOpCode)
 		addToSymTable(opStr: "POINT",  type: ._keywordType, opcode: ._pointOpCode)
+		addToSymTable(opStr: "CIRCLE", type: ._keywordType, opcode: ._circleOpCode)
+		addToSymTable(opStr: "RECT", type: ._keywordType, opcode: ._rectOpCode)
+		addToSymTable(opStr: "ROUNDRECT", type: ._keywordType, opcode: ._roundRectOpCode)
+		addToSymTable(opStr: "STAMP", type: ._keywordType, opcode: ._stampOpCode)
+		addToSymTable(opStr: "FLOOD", type: ._keywordType, opcode: ._floodOpCode)
+		addToSymTable(opStr: "CLONE", type: ._keywordType, opcode: ._cloneOpCode)
+		
 		// Milestone 27: SAMPLE registered as _unaryOpType so factor() treats it as
 		// a value-producing expression (RHS of assignments, IF conditions, etc.)
 		addToSymTable(opStr: "SAMPLE", type: ._unaryOpType, opcode: ._sampleOpCode)
@@ -2274,6 +2645,7 @@ class parseEval: NSObject {
 		// Milestone 33: PLAY and Sound Commands
 		addToSymTable(opStr: "PLAY", type: ._keywordType, opcode: ._playOpCode)
 		addToSymTable(opStr: "SOUND", type: ._keywordType, opcode: ._soundOpCode)
+		addToSymTable(opStr: "MEOW", type: ._keywordType, opcode: ._meowOpCode)
 		addToSymTable(opStr: "FILL", type: ._keywordType, opcode: ._fillOpCode)
 		addToSymTable(opStr: "TEXT", type: ._keywordType, opcode: ._textColorOpCode)
 		
@@ -2287,6 +2659,8 @@ class parseEval: NSObject {
 
 		// Milestone 10: WHILE loop keyword
 		addToSymTable(opStr: "WHILE", type: ._keywordType, opcode: ._whileOpCode)
+		// Milestone 39b: BREAK keyword
+		addToSymTable(opStr: "BREAK", type: ._keywordType, opcode: ._breakOpCode)
 
 		// Milestone 14: INKEY$ — registered as _readVarType so factor() sees it
 		// as a value-producing expression (used on RHS of assignments, e.g. k$ = INKEY$).
@@ -2327,6 +2701,11 @@ class parseEval: NSObject {
 		// Milestone 32: Errors in pTerm; GOTO and GOSUB Depreciated. 
 		addToSymTable(opStr: "GOTO", type: ._keywordType, opcode: ._noOpCode)
 		addToSymTable(opStr: "GOSUB", type: ._keywordType, opcode: ._noOpCode)
+		
+		// Milestone 59: Term SerialIn SerialOut
+		addToSymTable(opStr: "TERM",      type: ._keywordType, opcode: ._termOnOpCode)
+		addToSymTable(opStr: "SERIALOUT", type: ._keywordType, opcode: ._serialOutOpCode)
+		addToSymTable(opStr: "SERIALIN",  type: ._keywordType, opcode: ._serialInOpCode)
 		
 	}
 	
@@ -2915,7 +3294,52 @@ class parseEval: NSObject {
 				plantCode(code: 4)   // argCount — mirrors SAMPLE pattern
 				return newType
 				}
+			
+			// Milestone 43: INSTR(startAt, haystack$, needle$) — 3-argument string search
+			if tempCode == ._instrOpCode {
+				var newType = getLexeme()                       // get '('
+				newType = getLeftParenthesis(type: newType)     // validate '(', return first token inside
+				// startAt
+				newType = logicalExpression(type: newType)
+				if gParseError { return newType }
+				guard newType == ._assignOpType && gSymTable[gCode] == "," else {
+					parseError(errMsg: "Expected , after INSTR startAt"); return newType
+				}
+				// haystack$
+				newType = logicalExpression(type: getLexeme())
+				if gParseError { return newType }
+				guard newType == ._assignOpType && gSymTable[gCode] == "," else {
+					parseError(errMsg: "Expected , after INSTR haystack$"); return newType
+				}
+				// needle$
+				newType = logicalExpression(type: getLexeme())
+				if gParseError { return newType }
+				newType = getRightParenthesis(type: newType)
+				plantCode(code: evalOPcodes._instrOpCode.rawValue)
+				plantCode(code: 3)   // argCount
+				return newType
+				}
+			
+			// Milestone 42: STRING$(n, a$) — repeat a$ until result is n chars, truncated to 1024
+			if tempCode == ._stringNOpCode {
+				var newType = getLexeme()                       // get '('
+				newType = getLeftParenthesis(type: newType)     // validate '(' return first token inside
+				// n — repeat count
+				newType = logicalExpression(type: newType)
+				if gParseError { return newType }
+				guard newType == ._assignOpType && gSymTable[gCode] == "," else {
+					parseError(errMsg: "Expected , after STRING$ count"); return newType
+				}
+				// a$ — pattern string
+				newType = logicalExpression(type: getLexeme())
+				if gParseError { return newType }
+				newType = getRightParenthesis(type: newType)
+				plantCode(code: evalOPcodes._stringNOpCode.rawValue)
+				plantCode(code: 2)   // argCount
+				return newType
+				}
 
+			
 			// Special handling for MID$ function (3 arguments)
 			if tempCode == ._MIDopCode {
 				var newType = getLexeme()
@@ -2950,10 +3374,76 @@ class parseEval: NSObject {
 				newType = getRightParenthesis(type: newType)
 				plantCode(code: tempCode.rawValue)
 				return newType
+				
 			} else {
 				// Normal unary operators (SIN, COS, LEN, VAL, CHR$, ASC, STR$, etc.)
 				var newType = getLexeme()
 				newType = getLeftParenthesis(type: newType)
+
+				// Milestone 42b: LEN(array[]) — detect bare arrayName[] form only.
+				// Gates on array type first (no token side-effects for scalars).
+				// Then peeks past '[' — if ']' follows immediately it's the length form;
+				// if an index expression follows it's LEN(arr[i]) — treated as LEN of
+				// the element string, handled by the normal expression path.
+				if tempCode == ._LENopCode && newType == ._readVarType &&
+				   gCode > 0 && gCode <= gNumVarNames {
+					let lenArrNameIdx = gCode
+					let lenArrName    = gVarNames[lenArrNameIdx]
+					if let vt = gVariableTypes[lenArrName], vt.isArray() {
+						// Peek at token after array name
+						let peekBracket = getLexeme()
+						if peekBracket == ._leftBracketType {
+							// Peek one more — is this [] (empty) or [expr]?
+							let peekClose = getLexeme()
+							if peekClose == ._rightBracketType {
+								// Confirmed bare [] — emit lenArray opcode
+								let afterClose = getLexeme()
+								guard afterClose == ._rightParenType else {
+									parseError(errMsg: "Expected ) after LEN(array[])")
+									return afterClose
+								}
+								plantCode(code: evalOPcodes._lenArrayOpCode.rawValue)
+								plantCode(code: lenArrNameIdx)
+								return getLexeme()   // token after ')'
+							} else {
+								// LEN(arr[i]) — indexed element access.
+								// peekClose is the first token of the index expression.
+								// Re-enter parseArrayAccess with the index already started.
+								// We need to finish parsing [expr] then let LEN measure the element.
+								// Easiest: parse the index expression from peekClose, emit arrayLoad,
+								// then fall through to getRightParenthesis + _LENopCode.
+								var idxType = logicalExpression(type: peekClose)
+								if gParseError { return idxType }
+								guard idxType == ._rightBracketType else {
+									parseError(errMsg: "Expected ] in array index within LEN()")
+									return idxType
+								}
+								// Emit 1D array load
+								plantCode(code: evalOPcodes._arrayLoadOpCode.rawValue)
+								plantCode(code: lenArrNameIdx)
+								// Now consume ')' and emit LEN
+								idxType = getLexeme()
+								guard idxType == ._rightParenType else {
+									parseError(errMsg: "Expected ) after LEN(array[i])")
+									return idxType
+								}
+								plantCode(code: evalOPcodes._LENopCode.rawValue)
+								return getLexeme()   // token after ')'
+							}
+						} else {
+							// '[' not found after array name — treat as scalar expression.
+							// peekBracket is the next meaningful token; emit var load and continue.
+							plantCode(code: evalOPcodes._loadVarOpCode.rawValue)
+							plantCode(code: lenArrNameIdx)
+							newType = logicalExpression(type: peekBracket)
+							newType = getRightParenthesis(type: newType)
+							plantCode(code: evalOPcodes._LENopCode.rawValue)
+							return newType
+						}
+					}
+				}
+
+				// Normal unary path — scalar string or numeric expression
 				newType = expression(type: newType)
 				newType = getRightParenthesis(type: newType)
 				plantCode(code: tempCode.rawValue)
@@ -2985,6 +3475,7 @@ class parseEval: NSObject {
 	// Milestone 4: Parse a user-defined function call used as an expression.
 	// Called from factor() after we've already consumed the '(' token.
 	// Emits: _funcCallOpCode, funcNameIdx, argCount, [argCount values pushed on stack]
+	// Milestone 58: Now handles passin Multi-Dimensional Arrays (pass by Reference)
 	func parseFunctionCallExpression(funcName: String) -> lexemeTypes? {
 		if gParseError { return nil }
 
@@ -2993,23 +3484,57 @@ class parseEval: NSObject {
 			return nil
 		}
 
-		// We have already consumed '(' via getLexeme() in factor(), so we are
-		// positioned just inside the argument list.
 		var argCount = 0
 		var type: lexemeTypes? = getLexeme()
 
-		// Handle zero-argument functions: func foo() { ... }
+		// Handle zero-argument functions
 		if type == ._rightParenType {
 			type = getLexeme()
 		} else {
-			// Parse comma-separated argument expressions
 			while true {
-				type = logicalExpression(type: type)
-				if gParseError { return nil }
-				argCount += 1
-				
+				// Detect array argument: bare name[] syntax
+				// type is _readVarType and the next token is '['
+				if type == ._readVarType {
+					let arrNameIdx = gCode
+					let savedCharPos = gCharPos   // save position BEFORE peeking
+					let peekType = getLexeme()
+					if peekType == ._leftBracketType {
+						let peekClose = getLexeme()
+						if peekClose == ._rightBracketType {
+							// Confirmed bare name[] — array pass by reference
+							plantCode(code: evalOPcodes._arrayRefOpCode.rawValue)
+							plantCode(code: arrNameIdx)
+							argCount += 1
+							type = getLexeme()
+						} else {
+							// name[expr] — element access
+							var idxType = logicalExpression(type: peekClose)
+							if gParseError { return nil }
+							guard idxType == ._rightBracketType else {
+								parseError(errMsg: "Expected ] in array index in function call arg")
+								return nil
+							}
+							plantCode(code: evalOPcodes._arrayLoadOpCode.rawValue)
+							plantCode(code: arrNameIdx)
+							argCount += 1
+							type = getLexeme()
+						}
+					} else {
+						// Everything else — restore BOTH gCode and gCharPos so factor()
+						// re-reads the variable name and its following token correctly.
+						gCode = arrNameIdx
+						gCharPos = savedCharPos
+						type = logicalExpression(type: ._readVarType)
+						if gParseError { return nil }
+						argCount += 1
+					}
+				} else {
+					type = logicalExpression(type: type)
+					if gParseError { return nil }
+					argCount += 1
+				}
+
 				if type == ._assignOpType && gCode < gSymTable.count && gSymTable[gCode] == "," {
-					// More arguments follow
 					type = getLexeme()
 				} else if type == ._rightParenType {
 					type = getLexeme()
@@ -3021,12 +3546,12 @@ class parseEval: NSObject {
 			}
 		}
 
+		// Validate arg count — array params (ending in []) count as one arg each
 		if argCount != funcDef.params.count {
 			parseError(errMsg: "Function \(funcName) expects \(funcDef.params.count) argument(s), got \(argCount)")
 			return nil
 		}
 
-		// Emit function call opcode: _funcCallOpCode, nameIdx, argCount
 		let nameIdx = storeVarName(name: funcName)
 		plantCode(code: evalOPcodes._funcCallOpCode.rawValue)
 		plantCode(code: nameIdx)
@@ -3274,23 +3799,39 @@ class parseEval: NSObject {
 			parseError(errMsg: "Expected = in variable declaration")
 			return false
 		}
-		
+
 		type = getLexeme()
+
+		// ── Parse-time type inference ─────────────────────────────────────────────
+		// If no explicit : Type annotation was given (varType is still the default
+		// .intType) and the variable name has no $ suffix, check the first RHS token.
+		// A string literal (._readConstType with gCode < 0) means the user wrote:
+		//   var needle = "black"
+		// instead of:
+		//   var needle$ = "black"  or  var needle : String = "black"
+		// Auto-promote to String and print an advisory. Without this, the executor
+		// tries Int(_stringConstMarker) which is a fatal overflow crash.
+		if varType == .intType && !varName.hasSuffix("$") && type == ._readConstType && gCode < 0 {
+			varType = .stringType
+			let advisory = "Parser: '\(varName)' assigned a String but declared without a type — promoted to String. Declare as 'var \(varName)$ : String' to be explicit."
+			if let d = delegate { d.pscriptPrint(advisory, newline: true) }
+			else { print(advisory) }
+		}
+
 		type = logicalExpression(type: type)
-		
 		if gParseError { return false }
-		
-		// If parsing a function body line, register type locally not globally
+
+		// Register type
 		if let funcName = gCurrentParseFuncName {
 			if gFunctionLocalTypes[funcName] == nil { gFunctionLocalTypes[funcName] = [:] }
 			gFunctionLocalTypes[funcName]![varName] = varType
 		} else {
 			gVariableTypes[varName] = varType
 		}
-		
+
 		plantCode(code: evalOPcodes._storeVarOpCode.rawValue)
 		plantCode(code: storeVarName(name: varName))
-		
+
 		return true
 	}
 	
@@ -3608,7 +4149,263 @@ class parseEval: NSObject {
 		plantCode(code: argCount)
 		return true
 	}
+	
+	// Milestone 46: CIRCLE(x, y, radius)
+	// Uses gFillColor, gTextColor, gPenSize at executor time — no color args.
+	func parseCircleStatement() -> Bool {
+		if gParseError { return false }
+		var type = getLexeme()
+		guard type == ._leftParenType else {
+			parseError(errMsg: "Expected ( after CIRCLE"); return false
+		}
+		// x
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after CIRCLE x"); return false
+		}
+		// y
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after CIRCLE y"); return false
+		}
+		// radius
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._rightParenType else {
+			parseError(errMsg: "Expected ) after CIRCLE radius"); return false
+		}
+		plantCode(code: evalOPcodes._circleOpCode.rawValue)
+		return true
+	}
 
+	// Milestone 47: RECT(x1, y1, x2, y2)
+	func parseRectStatement() -> Bool {
+		if gParseError { return false }
+		var type = getLexeme()
+		guard type == ._leftParenType else {
+			parseError(errMsg: "Expected ( after RECT"); return false
+		}
+		// x1
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after RECT x1"); return false
+		}
+		// y1
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after RECT y1"); return false
+		}
+		// x2
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after RECT x2"); return false
+		}
+		// y2
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._rightParenType else {
+			parseError(errMsg: "Expected ) after RECT y2"); return false
+		}
+		plantCode(code: evalOPcodes._rectOpCode.rawValue)
+		return true
+	}
+
+	// Milestone 48: ROUNDRECT(x1, y1, x2, y2, cornerRadius)
+	func parseRoundRectStatement() -> Bool {
+		if gParseError { return false }
+		var type = getLexeme()
+		guard type == ._leftParenType else {
+			parseError(errMsg: "Expected ( after ROUNDRECT"); return false
+		}
+		// x1
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after ROUNDRECT x1"); return false
+		}
+		// y1
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after ROUNDRECT y1"); return false
+		}
+		// x2
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after ROUNDRECT x2"); return false
+		}
+		// y2
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after ROUNDRECT y2"); return false
+		}
+		// cornerRadius
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._rightParenType else {
+			parseError(errMsg: "Expected ) after ROUNDRECT cornerRadius"); return false
+		}
+		plantCode(code: evalOPcodes._roundRectOpCode.rawValue)
+		return true
+	}
+	
+	// Milestone 49: STAMP(x, y, spriteID)
+	// Bakes the named sprite's current texture permanently onto the canvas.
+	func parseStampStatement() -> Bool {
+		if gParseError { return false }
+		var type = getLexeme()
+		guard type == ._leftParenType else {
+			parseError(errMsg: "Expected ( after STAMP"); return false
+		}
+		// x
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after STAMP x"); return false
+		}
+		// y
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after STAMP y"); return false
+		}
+		// spriteID
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._rightParenType else {
+			parseError(errMsg: "Expected ) after STAMP spriteID"); return false
+		}
+		plantCode(code: evalOPcodes._stampOpCode.rawValue)
+		return true
+	}
+	
+	/// CLONE(id, x1, y1, x2, y2)
+	/// Captures canvas region (x1,y1)→(x2,y2) as sprite ID's texture.
+	/// Creates sprite if it doesn't exist (hidden=1, rotation=0, scale=1, alpha=1).
+	/// Bytecode: _cloneOpCode, 5
+	func parseCloneStatement() -> Bool {
+		if gParseError { return false }
+		var type = getLexeme()
+		type = getLeftParenthesis(type: type)
+		// id
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after CLONE id"); return false
+		}
+		// x1
+		type = logicalExpression(type: getLexeme())
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after CLONE x1"); return false
+		}
+		// y1
+		type = logicalExpression(type: getLexeme())
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after CLONE y1"); return false
+		}
+		// x2
+		type = logicalExpression(type: getLexeme())
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after CLONE x2"); return false
+		}
+		// y2
+		type = logicalExpression(type: getLexeme())
+		if gParseError { return false }
+		type = getRightParenthesis(type: type)
+		plantCode(code: evalOPcodes._cloneOpCode.rawValue)
+		plantCode(code: 5)
+		return !gParseError
+	}
+	
+	// Milestone 50: FLOOD(x, y, R, G, B, A)
+	// Scanline flood fill from seed point (x,y) with given fill colour.
+	func parseFloodStatement() -> Bool {
+		if gParseError { return false }
+		var type = getLexeme()
+		guard type == ._leftParenType else {
+			parseError(errMsg: "Expected ( after FLOOD"); return false
+		}
+		// x
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after FLOOD x"); return false
+		}
+		// y
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after FLOOD y"); return false
+		}
+		// R
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after FLOOD R"); return false
+		}
+		// G
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after FLOOD G"); return false
+		}
+		// B
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._assignOpType && gSymTable[gCode] == "," else {
+			parseError(errMsg: "Expected , after FLOOD B"); return false
+		}
+		// A
+		type = getLexeme()
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+		guard type == ._rightParenType else {
+			parseError(errMsg: "Expected ) after FLOOD A"); return false
+		}
+		plantCode(code: evalOPcodes._floodOpCode.rawValue)
+		return true
+	}
+	
+	
+	/// MEOW — plays a random meow[01|02|03].wav via the PLAY infrastructure.
+	/// No arguments. Bytecode: _meowOpCode (no operands).
+	func parseMeowStatement() -> Bool {
+		if gParseError { return false }
+		plantCode(code: evalOPcodes._meowOpCode.rawValue)
+		return true
+	}
+	
+	
 	// Milestone 27: parseSampleStatement() — superseded by factor() ._unaryOpType handling.
 	// SAMPLE is now registered as ._unaryOpType so it is parsed in factor() directly,
 	// allowing it to appear on the RHS of assignments and in expressions.
@@ -4057,6 +4854,13 @@ class parseEval: NSObject {
 				return true
 			case "POINT":   return parsePointStatement()
 			case "LINE":    return parseLineStatement()
+			case "CIRCLE":    return parseCircleStatement()
+			case "RECT":      return parseRectStatement()
+			case "ROUNDRECT": return parseRoundRectStatement()
+			case "STAMP": 	return parseStampStatement()
+			case "FLOOD":	return parseFloodStatement()
+			case "MEOW": 	return parseMeowStatement()
+			case "CLONE":	return parseCloneStatement()
 			case "SPRITE":  return parseSpriteStatement()
 			case "GET":     return parseGetStatement()
 			case "SAY":     return parseSayStatement()
@@ -4064,6 +4868,10 @@ class parseEval: NSObject {
 			case "SOUND":   return parseSoundStatement()
 			case "FILL":    return parseFillStatement()
 			case "TEXT":    return parseTextColorStatement()
+			case "TERM":      return parseTermStatement()
+			case "SERIALOUT": return parseSerialOutStatement()
+			case "SERIALIN":  return parseSerialInStatement()
+			
 			default:
 				parseError(errMsg: "Unsupported statement after THEN: \(keyword)")
 				return false
@@ -4097,10 +4905,47 @@ class parseEval: NSObject {
 		var type = getLexeme()
 
 		if type == nil {
-			// return with no value - push 0.0
+			// return with no value — push 0.0
 			plantCode(code: evalOPcodes._readConstCode.rawValue)
 			let zeroIdx = storeParsedConst(value: 0.0)
 			plantCode(code: zeroIdx)
+			plantCode(code: evalOPcodes._returnOpCode.rawValue)
+			return true
+		}
+
+		// Detect: return name[]  — array return
+		if type == ._readVarType {
+			let arrNameIdx = gCode
+			let savedCharPos = gCharPos   // save BEFORE peeking
+			let peekType = getLexeme()
+			if peekType == ._leftBracketType {
+				let peekClose = getLexeme()
+				if peekClose == ._rightBracketType {
+					// Confirmed bare return name[] — emit _returnArrayOpCode
+					plantCode(code: evalOPcodes._returnArrayOpCode.rawValue)
+					plantCode(code: arrNameIdx)
+					return true
+				} else {
+					// return arr[i] — element access
+					var idxType = logicalExpression(type: peekClose)
+					if gParseError { return false }
+					guard idxType == ._rightBracketType else {
+						parseError(errMsg: "Expected ] in return array element")
+						return false
+					}
+					plantCode(code: evalOPcodes._arrayLoadOpCode.rawValue)
+					plantCode(code: arrNameIdx)
+					plantCode(code: evalOPcodes._returnOpCode.rawValue)
+					return true
+				}
+			} else {
+				// Plain variable or expression — restore both gCode and gCharPos
+				// so logicalExpression re-parses from the variable name correctly.
+				gCode = arrNameIdx
+				gCharPos = savedCharPos
+				type = logicalExpression(type: ._readVarType)
+				if gParseError { return false }
+			}
 		} else {
 			type = logicalExpression(type: type)
 			if gParseError { return false }
@@ -4121,6 +4966,68 @@ class parseEval: NSObject {
 		// So this just needs to succeed silently.
 		return true
 	}
+	
+	
+	// Milestone 44/45: SORT and SORTLEN statement parser
+	func parseSortStatement(opcode: evalOPcodes) -> Bool {
+		var type = getLexeme()
+		var isReversed = 0
+
+		// Check for optional -rev flag
+		if type == ._plusMinusOpType && gSymTable[gCode] == "-" {
+			type = getLexeme()
+			guard type == ._readVarType && gVarNames[gCode].lowercased() == "rev" else {
+				parseError(errMsg: "Expected -rev after \(opcode == ._sortOpCode ? "SORT" : "SORTLEN")")
+				return false
+			}
+			isReversed = 1
+			type = getLexeme()
+		}
+
+		// Array name
+		guard type == ._readVarType else {
+			parseError(errMsg: "Expected array name after \(opcode == ._sortOpCode ? "SORT" : "SORTLEN")")
+			return false
+		}
+		let nameIdx = gCode
+
+		// Confirm array name is actually declared as an array type
+		let varName = gVarNames[nameIdx]
+		if let vt = gVariableTypes[varName] {
+			if !vt.isArray() {
+				parseError(errMsg: "\(varName) is not an array")
+				return false
+			}
+			// SORTLEN is strings-only
+			if opcode == ._sortLenOpCode && vt != .stringArrayType {
+				parseError(errMsg: "SORTLEN requires a String array")
+				return false
+			}
+			// Multi-dimensional arrays: check gArrayDimensions
+			if let dims = gArrayDimensions[varName], dims.count > 1 {
+				parseError(errMsg: "\(opcode == ._sortOpCode ? "SORT" : "SORTLEN") cannot sort a multi-dimensional array")
+				return false
+			}
+		}
+
+		// Consume []
+		type = getLexeme()
+		guard type == ._leftBracketType else {
+			parseError(errMsg: "Expected [] after array name")
+			return false
+		}
+		type = getLexeme()
+		guard type == ._rightBracketType else {
+			parseError(errMsg: "Expected ] after [")
+			return false
+		}
+
+		plantCode(code: opcode.rawValue)
+		plantCode(code: nameIdx)
+		plantCode(code: isReversed)
+		return true
+	}
+	
 	
 	// Milestone 21: Parse the RHS of a whole-array LOAD assignment.
 	// Called from parseStatement() after the parser has already consumed:
@@ -4452,7 +5359,7 @@ class parseEval: NSObject {
 		guard type == ._assignOpType && gSymTable[gCode] == "," else {
 			parseError(errMsg: "Expected , after TEXT b"); return false
 		}
-
+		
 		// a
 		type = logicalExpression(type: getLexeme())
 		if gParseError { return false }
@@ -4461,6 +5368,79 @@ class parseEval: NSObject {
 		if gParseError { return false }
 
 		plantCode(code: evalOPcodes._textColorOpCode.rawValue)
+		return true
+	}
+	
+	// TERM ON | TERM OFF
+	// Bytecode: _termOnOpCode or _termOffOpCode (no operands)
+	func parseTermStatement() -> Bool {
+		if gParseError { return false }
+		let type = getLexeme()
+		
+		// ON and OFF are not registered keywords — they come back as _readVarType.
+		// Read the identifier from gVarNames rather than gSymTable.
+		let word: String
+		if type == ._readVarType && gCode >= 1 && gCode <= gNumVarNames {
+			word = gVarNames[gCode].uppercased()
+		} else if type == ._keywordType {
+			word = gSymTable[gCode].uppercased()
+		} else {
+			parseError(errMsg: "Expected ON or OFF after TERM")
+			return false
+		}
+		
+		switch word {
+		case "ON":
+			plantCode(code: evalOPcodes._termOnOpCode.rawValue)
+		case "OFF":
+			plantCode(code: evalOPcodes._termOffOpCode.rawValue)
+		default:
+			parseError(errMsg: "Expected ON or OFF after TERM, got '\(word)'")
+			return false
+		}
+		return true
+	}
+	
+	// SERIALOUT expr [;]
+	// Bytecode: expr, _serialOutOpCode, mode
+	// mode 1 = newline, mode 2 = no newline (semicolon suffix)
+	func parseSerialOutStatement() -> Bool {
+		if gParseError { return false }
+
+		var type = getLexeme()
+		if type == nil {
+			// SERIALOUT with no argument — send blank line
+			plantCode(code: evalOPcodes._serialOutOpCode.rawValue)
+			plantCode(code: 0)   // mode 0 = blank line
+			return true
+		}
+
+		type = logicalExpression(type: type)
+		if gParseError { return false }
+
+		// Check for trailing semicolon — suppresses newline
+		if type == ._assignOpType && gCode < gSymTable.count && gSymTable[gCode] == ";" {
+			plantCode(code: evalOPcodes._serialOutOpCode.rawValue)
+			plantCode(code: 2)   // mode 2 = no newline
+		} else {
+			plantCode(code: evalOPcodes._serialOutOpCode.rawValue)
+			plantCode(code: 1)   // mode 1 = with newline
+		}
+		return true
+	}
+	
+	// SERIALIN varName
+	// Bytecode: _serialInOpCode, varNameIdx
+	func parseSerialInStatement() -> Bool {
+		if gParseError { return false }
+		let type = getLexeme()
+		guard type == ._readVarType else {
+			parseError(errMsg: "Expected variable name after SERIALIN")
+			return false
+		}
+		let varNameIdx = gCode
+		plantCode(code: evalOPcodes._serialInOpCode.rawValue)
+		plantCode(code: varNameIdx)
 		return true
 	}
 	
@@ -4556,6 +5536,7 @@ class parseEval: NSObject {
 				return parseReturnStatement()
 			case "LOCATE":
 				return parseLocateStatement()
+			
 			// pBasic: Graphics commands
 			case "CLR": 
 				plantCode(code: evalOPcodes._clrOpCode.rawValue)
@@ -4564,6 +5545,22 @@ class parseEval: NSObject {
 				return parsePointStatement()
 			case "LINE":
 				return parseLineStatement()
+				
+			case "CIRCLE": 
+				return parseCircleStatement()
+			case "RECT": 
+				return parseRectStatement()
+			case "ROUNDRECT": 
+				return parseRoundRectStatement()
+			case "STAMP": 
+				return parseStampStatement()
+			case "FLOOD": 
+				return parseFloodStatement()
+			case "MEOW": 
+				return parseMeowStatement()
+			case "CLONE": 
+				return parseCloneStatement()
+			
 			// Milestone 5: Timer statements
 			case "TIMER":
 				return parseTimerDeclStatement()
@@ -4579,7 +5576,8 @@ class parseEval: NSObject {
 				// No arguments — emit opcode only
 				plantCode(code: evalOPcodes._timerOffOpCode.rawValue)
 				return true
-				// Milestone 10: WHILE loop
+			
+			// Milestone 10: WHILE loop
 			case "WHILE":
 				return parseWhileStatement()
 				// Milestone 19: Double-buffering
@@ -4589,6 +5587,16 @@ class parseEval: NSObject {
 				//   BUFFER:1  — draw to buffer 1, display buffer 0
 				// Emits: _bufferOpCode, drawTo, displayBuf
 				// drawTo = -1 and displayBuf = -1 means "toggle at runtime"
+			case "BREAK": 
+				plantCode(code: evalOPcodes._breakOpCode.rawValue)
+				return true
+			
+			// Milestones 44 and 45: SORT and SORTLEN
+			case "SORT": 
+				return parseSortStatement(opcode: ._sortOpCode)
+			case "SORTLEN": 
+				return parseSortStatement(opcode: ._sortLenOpCode)
+			
 			case "BUFFER":
 				var bufDrawTo  = -1   // -1 = toggle sentinel
 				var bufDisplay = -1
@@ -4664,6 +5672,11 @@ class parseEval: NSObject {
 				return parseSpriteStatement()
 			case "GET":
 				return parseGetStatement()
+				
+			// Milestone 59: Term SerialIn SerialOut
+			case "TERM":      return parseTermStatement()
+			case "SERIALOUT": return parseSerialOutStatement()
+			case "SERIALIN":  return parseSerialInStatement()
 			
 			default:
 				parseError(errMsg: "Unknown keyword: \(keyword)")
@@ -4691,13 +5704,42 @@ class parseEval: NSObject {
 				let savedCode21    = gCode
 				let peekType21     = getLexeme()
 				if peekType21 == ._rightBracketType {
-					// Empty brackets confirmed — must be followed by = LOAD(url)
+					// Empty brackets confirmed — must be followed by =
 					let eqType21 = getLexeme()
 					guard eqType21 == ._assignOpType && gSymTable[gCode] == "=" else {
 						parseError(errMsg: "Expected = after \(varName)[]")
 						return false
 					}
-					return parseFileLoadStatement(arrayName: varName)
+					// M58: peek at what follows = to decide: LOAD(url) or funcCall()
+					// Save lexer state to peek at the RHS identifier
+					let savedCharPosM58 = gCharPos
+					let savedCodeM58    = gCode
+					let rhsType = getLexeme()
+					if rhsType == ._readVarType {
+						let rhsName = gVarNames[gCode]
+						let afterRhs = getLexeme()
+						if afterRhs == ._leftParenType && gFunctionDefs[rhsName.lowercased()] != nil {
+							// out[] = funcCall(...) — array return assignment
+							// Parse the function call; it will set gLastReturnedArrayName
+							_ = parseFunctionCallExpression(funcName: rhsName.lowercased())
+							if gParseError { return false }
+							// Emit _arrayReturnAssignOpCode: dest array name idx
+							let destIdx = storeVarName(name: varName)
+							plantCode(code: evalOPcodes._arrayReturnAssignOpCode.rawValue)
+							plantCode(code: destIdx)
+							return true
+						} else {
+							// Not a function call — restore and fall through to LOAD
+							gCharPos = savedCharPosM58
+							gCode    = savedCodeM58
+							return parseFileLoadStatement(arrayName: varName)
+						}
+					} else {
+						// Not a readVarType — restore and fall through to LOAD
+						gCharPos = savedCharPosM58
+						gCode    = savedCodeM58
+						return parseFileLoadStatement(arrayName: varName)
+					}
 				} else {
 					// Non-empty brackets — restore lexer state and fall through to
 					// normal single-element array assignment arr[expr] = value.
@@ -5591,6 +6633,25 @@ class parseEval: NSObject {
 
 				let def = FunctionDef(name: funcName, params: params, bodyStartLine: bodyStart, bodyEndLine: bodyEnd)
 				gFunctionDefs[funcName] = def
+				
+				// M58: Warn if function body has no RETURN statement.
+				// Scan body lines for any line beginning with RETURN (case-insensitive).
+				// This is a warning only — not a parse error — but helps beginners
+				// catch missing returns before they cause silent runtime failures.
+				let hasReturn = (bodyStart..<bodyEnd).contains { lineIdx in
+					let bodyLine = gProgramLines[lineIdx]
+						.trimmingCharacters(in: .whitespaces)
+						.uppercased()
+					return bodyLine.hasPrefix("RETURN")
+				}
+				if !hasReturn {
+					let warnMsg = "Parser: Function '\(funcName)' has no RETURN statement"
+					if let d = delegate {
+						d.pscriptPrint(warnMsg, newline: true)
+					} else {
+						print(warnMsg)
+					}
+				}
 			}
 
 			i += 1
@@ -5632,10 +6693,10 @@ class parseEval: NSObject {
 		for (i, line) in gProgramLines.enumerated() {
 			if funcHeaderLines.contains(i)  { continue }
 			if funcClosingLines.contains(i) { continue }
-
+			
 			let trimmed = line.trimmingCharacters(in: .whitespaces)
 			let upper   = trimmed.uppercased()
-
+			
 			// WHILE header — push whileBlock
 			if upper.hasPrefix("WHILE ") || upper.hasPrefix("WHILE(") {
 				braceStack.append((owner: .whileBlock, line: i))
@@ -5647,7 +6708,7 @@ class parseEval: NSObject {
 					braceStack.append((owner: .ifBlock, line: i))
 				}
 				// Single-line IF THEN — no brace, ignore here
-
+			
 			// Standalone { on its own line — opening brace of a block
 			// whose keyword was on the previous line. No push needed —
 			// the keyword line is already on the stack.
@@ -5669,6 +6730,7 @@ class parseEval: NSObject {
 		}
 		// Unmatched entries → syntax error; executor will report at runtime.
 	}
+	
 	
 	func executeProgramWithControlFlow() {
 		clearParseError()
@@ -6022,6 +7084,28 @@ class parseEval: NSObject {
 						length = sv.count
 					}
 					execStack[execLevel] = Double(length)
+					
+				// Milestone 42b: LEN(array[]) — count used elements
+				// String arrays: count of elements != ""
+				// Int/Float/Bool arrays: total allocated size
+				case ._lenArrayOpCode:
+					execIndex += 1
+					let lenArrNameIdx = execCodeArray[execIndex]
+					let lenArrName    = gVarNames[lenArrNameIdx]
+					var lenArrResult  = 0
+					gVariablesLock.lock()
+					if let arr = gStringArrays[lenArrName] {
+						lenArrResult = arr.filter { !$0.isEmpty }.count
+					} else if let arr = gIntArrays[lenArrName] {
+						lenArrResult = arr.count
+					} else if let arr = gFloatArrays[lenArrName] {
+						lenArrResult = arr.count
+					} else if let arr = gBoolArrays[lenArrName] {
+						lenArrResult = arr.count
+					}
+					gVariablesLock.unlock()
+					execLevel += 1
+					execStack[execLevel] = Double(lenArrResult)
 
 				case ._MIDopCode:
 					let rangeVal = Int(execStack[execLevel]); execLevel -= 1
@@ -6334,7 +7418,20 @@ class parseEval: NSObject {
 						guard let line = readLine() else { evalErr = true; break }
 						inp = line
 					}
-				
+					
+					// M59: Check for break requested during input blocking
+					if gBreakRequested {
+						gBreakRequested = false
+						timerOff()
+						if let d = delegate {
+							d.pscriptPrint("", newline: true)
+							d.pscriptPrint("Break", newline: true)
+						} else {
+							print("\nBreak")
+						}
+						return
+					}
+					
 					// Store the input value into the target variable (unchanged logic)
 					if let vt = resolveVarType(varName: varName2) {
 						let iv: Value
@@ -6361,7 +7458,7 @@ class parseEval: NSObject {
 				case ._arrayLoadOpCode:
 					execIndex += 1
 					let varNameIdx3 = execCodeArray[execIndex]
-					let varName3 = gVarNames[varNameIdx3]
+					let varName3 = gCallStack.last?.arrayParamMap[gVarNames[varNameIdx3]] ?? gVarNames[varNameIdx3]
 					let ai3 = Int(execStack[execLevel]); execLevel -= 1
 					guard let vt3 = resolveVarType(varName: varName3) else {
 						let errMsg5c = "Parse Error: Array \(varName3) not declared"
@@ -6387,7 +7484,7 @@ class parseEval: NSObject {
 				case ._arrayStoreOpCode:
 					execIndex += 1
 					let varNameIdx4 = execCodeArray[execIndex]
-					let varName4 = gVarNames[varNameIdx4]
+					let varName4 = gCallStack.last?.arrayParamMap[gVarNames[varNameIdx4]] ?? gVarNames[varNameIdx4]
 					let asVal = execStack[execLevel]; execLevel -= 1
 					let asIdx = Int(execStack[execLevel]); execLevel -= 1
 					guard let vt4 = resolveVarType(varName: varName4) else {
@@ -6426,201 +7523,274 @@ class parseEval: NSObject {
 						evalErr = true
 					}
 					
-					// Milestone 23: Multi-dim array load — arrayName[i0,i1,...,iN-1]
-					// Bytecode: _arrayLoadMDOpCode, nameIdx, dimCount
-					// Stack on entry (bottom→top): i0, i1, ..., iN-1
-					case ._arrayLoadMDOpCode:
-						execIndex += 1
-						let mdLoadNameIdx = execCodeArray[execIndex]
-						execIndex += 1
-						let mdLoadDimCount = execCodeArray[execIndex]
-						let mdLoadName = gVarNames[mdLoadNameIdx]
+				// Milestone 23: Multi-dim array load — arrayName[i0,i1,...,iN-1]
+				// Bytecode: _arrayLoadMDOpCode, nameIdx, dimCount
+				// Stack on entry (bottom→top): i0, i1, ..., iN-1
+				case ._arrayLoadMDOpCode:
+					execIndex += 1
+					let mdLoadNameIdx = execCodeArray[execIndex]
+					execIndex += 1
+					let mdLoadDimCount = execCodeArray[execIndex]
+					let mdLoadName = gCallStack.last?.arrayParamMap[gVarNames[mdLoadNameIdx]] ?? gVarNames[mdLoadNameIdx]
 
-						// Pop indices from stack (iN-1 on top, i0 deepest)
-						var mdLoadIndices = [Int](repeating: 0, count: mdLoadDimCount)
-						for di in stride(from: mdLoadDimCount - 1, through: 0, by: -1) {
-							mdLoadIndices[di] = Int(execStack[execLevel]); execLevel -= 1
+					// Pop indices from stack (iN-1 on top, i0 deepest)
+					var mdLoadIndices = [Int](repeating: 0, count: mdLoadDimCount)
+					for di in stride(from: mdLoadDimCount - 1, through: 0, by: -1) {
+						mdLoadIndices[di] = Int(execStack[execLevel]); execLevel -= 1
+					}
+
+					guard let mdLoadVT = resolveVarType(varName: mdLoadName) else {
+						print("Error: Array \(mdLoadName) not declared"); evalErr = true; break
+					}
+
+					// Compute flat index using stored dimension strides
+					gVariablesLock.lock()
+					let mdLoadDims = gArrayDimensions[mdLoadName] ?? [1]
+					gVariablesLock.unlock()
+
+					if mdLoadDims.count != mdLoadDimCount {
+						print("Error: \(mdLoadName) has \(mdLoadDims.count) dimension(s), got \(mdLoadDimCount) index(es)")
+						evalErr = true; break
+					}
+
+					// Compute strides and flat index
+					var mdLoadFlat = 0
+						// strides computed right-to-left
+						var mdLoadStrides = [Int](repeating: 1, count: mdLoadDimCount)
+						for si in stride(from: mdLoadDimCount - 2, through: 0, by: -1) {
+							mdLoadStrides[si] = mdLoadStrides[si + 1] * mdLoadDims[si + 1]
 						}
-
-						guard let mdLoadVT = resolveVarType(varName: mdLoadName) else {
-							print("Error: Array \(mdLoadName) not declared"); evalErr = true; break
-						}
-
-						// Compute flat index using stored dimension strides
-						gVariablesLock.lock()
-						let mdLoadDims = gArrayDimensions[mdLoadName] ?? [1]
-						gVariablesLock.unlock()
-
-						if mdLoadDims.count != mdLoadDimCount {
-							print("Error: \(mdLoadName) has \(mdLoadDims.count) dimension(s), got \(mdLoadDimCount) index(es)")
+					for di in 0..<mdLoadDimCount {
+						if mdLoadIndices[di] < 0 || mdLoadIndices[di] >= mdLoadDims[di] {
+							print("Error: Index \(mdLoadIndices[di]) out of bounds for dimension \(di) of \(mdLoadName) (size \(mdLoadDims[di]))")
 							evalErr = true; break
 						}
+						mdLoadFlat += mdLoadIndices[di] * mdLoadStrides[di]
+					}
+					if evalErr { break }
 
-						// Compute strides and flat index
-						var mdLoadFlat = 0
-							// strides computed right-to-left
-							var mdLoadStrides = [Int](repeating: 1, count: mdLoadDimCount)
-							for si in stride(from: mdLoadDimCount - 2, through: 0, by: -1) {
-								mdLoadStrides[si] = mdLoadStrides[si + 1] * mdLoadDims[si + 1]
-							}
-						for di in 0..<mdLoadDimCount {
-							if mdLoadIndices[di] < 0 || mdLoadIndices[di] >= mdLoadDims[di] {
-								print("Error: Index \(mdLoadIndices[di]) out of bounds for dimension \(di) of \(mdLoadName) (size \(mdLoadDims[di]))")
-								evalErr = true; break
-							}
-							mdLoadFlat += mdLoadIndices[di] * mdLoadStrides[di]
+					// Load from flat index using existing helper
+					gVariablesLock.lock()
+					let mdLoadVal = getArrayElement(name: mdLoadName, index: mdLoadFlat, type: mdLoadVT)
+					gVariablesLock.unlock()
+
+					if let av = mdLoadVal {
+						execLevel += 1
+						if mdLoadVT.baseType() == .stringType {
+							if case .string(let s) = av { gTempStringForArray = s }
+							else { gTempStringForArray = "" }
+							execStack[execLevel] = _stringVarMarker
+							execStringVars[execLevel] = _tempArrayStringVarIndex
+						} else {
+							execStack[execLevel] = av.toDouble()
 						}
-						if evalErr { break }
+					} else {
+						print("Error: Flat index \(mdLoadFlat) out of bounds for \(mdLoadName)")
+						evalErr = true
+					}
 
-						// Load from flat index using existing helper
-						gVariablesLock.lock()
-						let mdLoadVal = getArrayElement(name: mdLoadName, index: mdLoadFlat, type: mdLoadVT)
-						gVariablesLock.unlock()
+				// Milestone 23: Multi-dim array store — arrayName[i0,i1,...,iN-1] = value
+				// Bytecode: _arrayStoreMDOpCode, nameIdx, dimCount
+				// Stack on entry (bottom→top): i0, i1, ..., iN-1, value
+				case ._arrayStoreMDOpCode:
+					execIndex += 1
+					let mdStoreNameIdx = execCodeArray[execIndex]
+					execIndex += 1
+					let mdStoreDimCount = execCodeArray[execIndex]
+					let mdStoreName = gCallStack.last?.arrayParamMap[gVarNames[mdStoreNameIdx]] ?? gVarNames[mdStoreNameIdx]
 
-						if let av = mdLoadVal {
-							execLevel += 1
-							if mdLoadVT.baseType() == .stringType {
-								if case .string(let s) = av { gTempStringForArray = s }
-								else { gTempStringForArray = "" }
-								execStack[execLevel] = _stringVarMarker
-								execStringVars[execLevel] = _tempArrayStringVarIndex
+					// Pop value first (top of stack), then indices
+					let mdStoreVal = execStack[execLevel]
+					let mdStoreSC  = execStringConsts[execLevel]
+					let mdStoreSV  = execStringVars[execLevel]
+					execLevel -= 1
+
+					var mdStoreIndices = [Int](repeating: 0, count: mdStoreDimCount)
+					for di in stride(from: mdStoreDimCount - 1, through: 0, by: -1) {
+						mdStoreIndices[di] = Int(execStack[execLevel]); execLevel -= 1
+					}
+
+					guard let mdStoreVT = resolveVarType(varName: mdStoreName) else {
+						print("Error: Array \(mdStoreName) not declared"); evalErr = true; break
+					}
+
+					gVariablesLock.lock()
+					let mdStoreDims = gArrayDimensions[mdStoreName] ?? [1]
+					gVariablesLock.unlock()
+
+					if mdStoreDims.count != mdStoreDimCount {
+						print("Error: \(mdStoreName) has \(mdStoreDims.count) dimension(s), got \(mdStoreDimCount) index(es)")
+						evalErr = true; break
+					}
+
+					// Compute strides and flat index
+					var mdStoreStrides = [Int](repeating: 1, count: mdStoreDimCount)
+					for si in stride(from: mdStoreDimCount - 2, through: 0, by: -1) {
+						mdStoreStrides[si] = mdStoreStrides[si + 1] * mdStoreDims[si + 1]
+					}
+					var mdStoreFlat = 0
+					for di in 0..<mdStoreDimCount {
+						if mdStoreIndices[di] < 0 || mdStoreIndices[di] >= mdStoreDims[di] {
+							print("Error: Index \(mdStoreIndices[di]) out of bounds for dimension \(di) of \(mdStoreName) (size \(mdStoreDims[di]))")
+							evalErr = true; break
+						}
+						mdStoreFlat += mdStoreIndices[di] * mdStoreStrides[di]
+					}
+					if evalErr { break }
+
+					// Build Value to store
+					let mdStoreValue: Value
+					switch mdStoreVT.baseType() {
+					case .intType:   mdStoreValue = .int(Int(mdStoreVal))
+					case .floatType: mdStoreValue = .float(mdStoreVal)
+					case .stringType:
+						if mdStoreVal == _stringConstMarker {
+							mdStoreValue = .string(gStringConstants[mdStoreSC])
+						} else if mdStoreVal == _stringVarMarker {
+							if mdStoreSV == _tempArrayStringVarIndex {
+								mdStoreValue = .string(gTempStringForArray)
 							} else {
-								execStack[execLevel] = av.toDouble()
+								let sn = gVarNames[mdStoreSV]
+								let (v,_,_) = resolveVarRead(varName: sn)
+								mdStoreValue = v ?? .string("")
 							}
 						} else {
-							print("Error: Flat index \(mdLoadFlat) out of bounds for \(mdLoadName)")
-							evalErr = true
+							mdStoreValue = .string(mdStoreVal == floor(mdStoreVal) && abs(mdStoreVal) < Double(Int.max)
+								? String(Int(mdStoreVal)) : String(format: "%.6g", mdStoreVal))
 						}
+					case .boolType:  mdStoreValue = .bool(mdStoreVal != 0.0)
+					default: print("Error: Invalid array base type"); evalErr = true; mdStoreValue = .int(0)
+					}
+					if evalErr { break }
 
-					// Milestone 23: Multi-dim array store — arrayName[i0,i1,...,iN-1] = value
-					// Bytecode: _arrayStoreMDOpCode, nameIdx, dimCount
-					// Stack on entry (bottom→top): i0, i1, ..., iN-1, value
-					case ._arrayStoreMDOpCode:
-						execIndex += 1
-						let mdStoreNameIdx = execCodeArray[execIndex]
-						execIndex += 1
-						let mdStoreDimCount = execCodeArray[execIndex]
-						let mdStoreName = gVarNames[mdStoreNameIdx]
+					gVariablesLock.lock()
+					let mdStoreOk = setArrayElement(name: mdStoreName, index: mdStoreFlat, value: mdStoreValue, type: mdStoreVT)
+					gVariablesLock.unlock()
+					if !mdStoreOk {
+						print("Error: Flat index \(mdStoreFlat) out of bounds for \(mdStoreName)")
+						evalErr = true
+					}
+				
+				// Milestone 23: REDIM — resize with logical-address-preserving copy
+				// Bytecode: _redimOpCode, nameIdx, dimCount
+				// Stack on entry (bottom→top): d0, d1, ..., dN-1 (new dimension sizes)
+				case ._redimOpCode:
+					execIndex += 1
+					let rdNameIdx  = execCodeArray[execIndex]
+					execIndex += 1
+					let rdDimCount = execCodeArray[execIndex]
+					let rdName     = gVarNames[rdNameIdx]
 
-						// Pop value first (top of stack), then indices
-						let mdStoreVal = execStack[execLevel]
-						let mdStoreSC  = execStringConsts[execLevel]
-						let mdStoreSV  = execStringVars[execLevel]
-						execLevel -= 1
+					// Pop new dimension sizes (dN-1 on top, d0 deepest)
+					var rdNewDims = [Int](repeating: 0, count: rdDimCount)
+					for di in stride(from: rdDimCount - 1, through: 0, by: -1) {
+						rdNewDims[di] = Int(execStack[execLevel]); execLevel -= 1
+					}
 
-						var mdStoreIndices = [Int](repeating: 0, count: mdStoreDimCount)
-						for di in stride(from: mdStoreDimCount - 1, through: 0, by: -1) {
-							mdStoreIndices[di] = Int(execStack[execLevel]); execLevel -= 1
-						}
+					// Validate: array must be declared
+					guard let rdVarType = resolveVarType(varName: rdName) else {
+						print("Error: REDIM — array '\(rdName)' not declared"); evalErr = true; break
+					}
+					guard rdVarType.isArray() else {
+						print("Error: REDIM — '\(rdName)' is not an array"); evalErr = true; break
+					}
 
-						guard let mdStoreVT = resolveVarType(varName: mdStoreName) else {
-							print("Error: Array \(mdStoreName) not declared"); evalErr = true; break
-						}
+					// Validate: dimension count must match original
+					gVariablesLock.lock()
+					let rdOldDims = gArrayDimensions[rdName] ?? []
+					gVariablesLock.unlock()
+					if !rdOldDims.isEmpty && rdOldDims.count != rdDimCount {
+						print("Error: REDIM — '\(rdName)' was declared with \(rdOldDims.count) dimension(s); cannot REDIM to \(rdDimCount)")
+						evalErr = true; break
+					}
 
-						gVariablesLock.lock()
-						let mdStoreDims = gArrayDimensions[mdStoreName] ?? [1]
-						gVariablesLock.unlock()
+					// Validate all new dims positive
+					var rdNewSize = 1
+					for d in rdNewDims {
+						if d <= 0 { print("Error: REDIM dimension must be positive"); evalErr = true; break }
+						rdNewSize *= d
+					}
+					if evalErr { break }
 
-						if mdStoreDims.count != mdStoreDimCount {
-							print("Error: \(mdStoreName) has \(mdStoreDims.count) dimension(s), got \(mdStoreDimCount) index(es)")
-							evalErr = true; break
-						}
+					if !resizeArray(name: rdName, newSize: rdNewSize, type: rdVarType, newDims: rdNewDims) {
+						print("Error: REDIM failed for '\(rdName)'"); evalErr = true
+					}
+				
+				// Milestone 58 Functions pass Multi-Dimensional Arrays (pass by Reference)
+				// we do this by pushing array name as string sentinel
+				case ._arrayRefOpCode:
+					execIndex += 1
+					let arrRefNameIdx = execCodeArray[execIndex]
+					let arrRefName = gVarNames[arrRefNameIdx]
+					// Push the array name as a string constant sentinel onto the eval stack.
+					// _funcCallOpCode will read this back and store it in arrayParamMap.
+					let arrRefSI = storeStringConst(value: arrRefName)
+					execLevel += 1
+					execStack[execLevel] = _stringConstMarker
+					execStringConsts[execLevel] = arrRefSI
+					gStringConstRefs[execLevel] = arrRefSI
+					
+				case ._returnArrayOpCode:
+					execIndex += 1
+					let retArrNameIdx = execCodeArray[execIndex]
+					let retArrLocalName = gVarNames[retArrNameIdx]
 
-						// Compute strides and flat index
-						var mdStoreStrides = [Int](repeating: 1, count: mdStoreDimCount)
-						for si in stride(from: mdStoreDimCount - 2, through: 0, by: -1) {
-							mdStoreStrides[si] = mdStoreStrides[si + 1] * mdStoreDims[si + 1]
-						}
-						var mdStoreFlat = 0
-						for di in 0..<mdStoreDimCount {
-							if mdStoreIndices[di] < 0 || mdStoreIndices[di] >= mdStoreDims[di] {
-								print("Error: Index \(mdStoreIndices[di]) out of bounds for dimension \(di) of \(mdStoreName) (size \(mdStoreDims[di]))")
-								evalErr = true; break
-							}
-							mdStoreFlat += mdStoreIndices[di] * mdStoreStrides[di]
-						}
-						if evalErr { break }
+					// Resolve through arrayParamMap in case this is itself a redirected param
+					let resolvedRetName: String
+					if let mapped = gCallStack.last?.arrayParamMap[retArrLocalName] {
+						resolvedRetName = mapped
+					} else {
+						resolvedRetName = retArrLocalName
+					}
+					gLastReturnedArrayName = resolvedRetName
 
-						// Build Value to store
-						let mdStoreValue: Value
-						switch mdStoreVT.baseType() {
-						case .intType:   mdStoreValue = .int(Int(mdStoreVal))
-						case .floatType: mdStoreValue = .float(mdStoreVal)
-						case .stringType:
-							if mdStoreVal == _stringConstMarker {
-								mdStoreValue = .string(gStringConstants[mdStoreSC])
-							} else if mdStoreVal == _stringVarMarker {
-								if mdStoreSV == _tempArrayStringVarIndex {
-									mdStoreValue = .string(gTempStringForArray)
-								} else {
-									let sn = gVarNames[mdStoreSV]
-									let (v,_,_) = resolveVarRead(varName: sn)
-									mdStoreValue = v ?? .string("")
-								}
-							} else {
-								mdStoreValue = .string(mdStoreVal == floor(mdStoreVal) && abs(mdStoreVal) < Double(Int.max)
-									? String(Int(mdStoreVal)) : String(format: "%.6g", mdStoreVal))
-							}
-						case .boolType:  mdStoreValue = .bool(mdStoreVal != 0.0)
-						default: print("Error: Invalid array base type"); evalErr = true; mdStoreValue = .int(0)
-						}
-						if evalErr { break }
+					// Restore calling frame (same as _returnOpCode, no scalar value to push)
+					guard !gCallStack.isEmpty else {
+						let errMsg = "Parse Error: RETURN outside function"
+						print(errMsg); delegate?.pscriptPrint(errMsg, newline: true)
+						evalErr = true; break
+					}
+					let doneArr = gCallStack.removeLast()
+					gForLoopStack   = doneArr.savedForLoopStack
+					gWhileLoopStack = doneArr.savedWhileLoopStack
+					insideFunction = !gCallStack.isEmpty
 
-						gVariablesLock.lock()
-						let mdStoreOk = setArrayElement(name: mdStoreName, index: mdStoreFlat, value: mdStoreValue, type: mdStoreVT)
-						gVariablesLock.unlock()
-						if !mdStoreOk {
-							print("Error: Flat index \(mdStoreFlat) out of bounds for \(mdStoreName)")
-							evalErr = true
-						}
+					execStack        = doneArr.savedStack
+					execStringConsts = doneArr.savedStringConstRefs
+					execStringVars   = doneArr.savedStringVarRefs
+					for i in 0..<_maxEvalStackSize {
+						gStringConstRefs[i] = execStringConsts[i]
+						gStringVarRefs[i]   = execStringVars[i]
+					}
+					execLevel = doneArr.savedStackLevel
 
-					// Milestone 23: REDIM — resize with logical-address-preserving copy
-					// Bytecode: _redimOpCode, nameIdx, dimCount
-					// Stack on entry (bottom→top): d0, d1, ..., dN-1 (new dimension sizes)
-					case ._redimOpCode:
-						execIndex += 1
-						let rdNameIdx  = execCodeArray[execIndex]
-						execIndex += 1
-						let rdDimCount = execCodeArray[execIndex]
-						let rdName     = gVarNames[rdNameIdx]
-
-						// Pop new dimension sizes (dN-1 on top, d0 deepest)
-						var rdNewDims = [Int](repeating: 0, count: rdDimCount)
-						for di in stride(from: rdDimCount - 1, through: 0, by: -1) {
-							rdNewDims[di] = Int(execStack[execLevel]); execLevel -= 1
-						}
-
-						// Validate: array must be declared
-						guard let rdVarType = resolveVarType(varName: rdName) else {
-							print("Error: REDIM — array '\(rdName)' not declared"); evalErr = true; break
-						}
-						guard rdVarType.isArray() else {
-							print("Error: REDIM — '\(rdName)' is not an array"); evalErr = true; break
-						}
-
-						// Validate: dimension count must match original
-						gVariablesLock.lock()
-						let rdOldDims = gArrayDimensions[rdName] ?? []
-						gVariablesLock.unlock()
-						if !rdOldDims.isEmpty && rdOldDims.count != rdDimCount {
-							print("Error: REDIM — '\(rdName)' was declared with \(rdOldDims.count) dimension(s); cannot REDIM to \(rdDimCount)")
-							evalErr = true; break
-						}
-
-						// Validate all new dims positive
-						var rdNewSize = 1
-						for d in rdNewDims {
-							if d <= 0 { print("Error: REDIM dimension must be positive"); evalErr = true; break }
-							rdNewSize *= d
-						}
-						if evalErr { break }
-
-						if !resizeArray(name: rdName, newSize: rdNewSize, type: rdVarType, newDims: rdNewDims) {
-							print("Error: REDIM failed for '\(rdName)'"); evalErr = true
-						}
-
-					case ._forBeginOpCode:
+					pc = doneArr.returnPC
+					execCodeArray = lineCodeArrays[pc]
+					execIndex = doneArr.returnIndex - 1
+				
+				case ._arrayReturnAssignOpCode:
+					execIndex += 1
+					let destArrNameIdx = execCodeArray[execIndex]
+					let destArrName = gVarNames[destArrNameIdx]
+					// gLastReturnedArrayName was set by _returnArrayOpCode just before this
+					let srcName = gLastReturnedArrayName
+					guard !srcName.isEmpty else {
+						let errMsg = "Runtime Error: no array was returned"
+						print(errMsg); delegate?.pscriptPrint(errMsg, newline: true)
+						evalErr = true; break
+					}
+					// Copy the source array registry entries to the destination name
+					if let dims = gArrayDimensions[srcName] { gArrayDimensions[destArrName] = dims }
+					if let arr  = gIntArrays[srcName]       { gIntArrays[destArrName]    = arr }
+					if let arr  = gFloatArrays[srcName]     { gFloatArrays[destArrName]  = arr }
+					if let arr  = gStringArrays[srcName]    { gStringArrays[destArrName] = arr }
+					if let arr  = gBoolArrays[srcName]      { gBoolArrays[destArrName]   = arr }
+					if let vt   = gVariableTypes[srcName]   { gVariableTypes[destArrName] = vt }
+					gLastReturnedArrayName = ""
+					
+				case ._forBeginOpCode:
 					execIndex += 1; let lvName = gVarNames[execCodeArray[execIndex]]
+					//print("DEBUG forBegin: \(lvName) at pc=\(pc) stackSize=\(gForLoopStack.count)")
 					execIndex += 1; let hasStep = execCodeArray[execIndex]
 					var stepVal = 1.0
 					if hasStep == 1 { stepVal = execStack[execLevel]; execLevel -= 1 }
@@ -6628,6 +7798,7 @@ class parseEval: NSObject {
 					gForLoopStack.append(ForLoopInfo(varName: lvName, endValue: endVal, stepValue: stepVal, loopStartPC: pc + 1))
 
 				case ._forNextOpCode:
+					//print("DEBUG forNext: top=\(gForLoopStack.last?.varName ?? "EMPTY") at pc=\(pc) stackSize=\(gForLoopStack.count)")
 					guard !gForLoopStack.isEmpty else {
 						let errMsg5f = "Parse Error: NEXT without FOR"
 						print(errMsg5f); delegate?.pscriptPrint(errMsg5f, newline: true)
@@ -6678,6 +7849,35 @@ class parseEval: NSObject {
 				case ._ifEndOpCode:
 					break   // no-op — fall through to next line
 				
+				// Milestone 39b: BREAK — exit innermost enclosing WHILE or IF block
+				case ._breakOpCode:
+					// Walk both pair tables to find the nearest enclosing block.
+					// "Nearest" = the one whose opening line is closest to (but before) pc.
+					var breakTarget: Int? = nil
+					var nearest = -1
+					for (startLine, endLine) in gWhilePairs {
+						if startLine < pc && endLine > pc && startLine > nearest {
+							nearest     = startLine
+							breakTarget = endLine
+						}
+					}
+					for (startLine, endLine) in gIfPairs {
+						if startLine < pc && endLine > pc && startLine > nearest {
+							nearest     = startLine
+							breakTarget = endLine
+						}
+					}
+					guard let target = breakTarget else {
+						let breakErrMsg = "Parser: BREAK outside WHILE or IF block at line \(pc+1)"
+						if let d = delegate { d.pscriptPrint(breakErrMsg, newline: true) }
+						else { print(breakErrMsg) }
+						evalErr = true; break
+					}
+					// Jump to closing } line, then pc+=1 at bottom of lineLoop lands after it
+					pc = target
+					pc += 1
+					if loadNextLine() { continue lineLoop } else { return }
+					
 				// Milestone 10: WHILE — test condition, jump past } if false, fall through if true
 				case ._whileOpCode:
 					let cond = execStack[execLevel]; execLevel -= 1
@@ -6700,7 +7900,7 @@ class parseEval: NSObject {
 				case ._whileEndOpCode:
 					guard let whileLine = gWhileEnds[pc] else {
 						let errMsg5i = "Parse Error: } at line \(pc+1) has no matching WHILE"
-						print(errMsg5i); delegate?.pscriptPrint(errMsg5i, newline: true)
+						print(errMsg5i); delegate?.pscriptPrint(errMsg5i, newline: true)	// find: eee debug
 						evalErr = true; break
 					}
 					// Jump back to the WHILE line so its condition is re-evaluated
@@ -6712,6 +7912,7 @@ class parseEval: NSObject {
 					execIndex += 1; let fnIdx = execCodeArray[execIndex]
 					execIndex += 1; let argc = execCodeArray[execIndex]
 					let fnName = gVarNames[fnIdx]
+					//print("DEBUG funcCall: \(fnName) at pc=\(pc) forStackSize=\(gForLoopStack.count)")
 					guard let fdef = gFunctionDefs[fnName] else {
 						let errMsg5j = "Parse Error: Function '\(fnName)' not defined"
 						print(errMsg5j); delegate?.pscriptPrint(errMsg5j, newline: true)
@@ -6729,22 +7930,51 @@ class parseEval: NSObject {
 					}
 					let savedLevel = execLevel - argc   // level BEFORE any args
 
-					// Build local vars from params
+					// Build local vars from params — scalar params go into localVars,
+					// array params go into arrayParamMap (pass by reference redirect).
 					var localVars: [String: VariableInfo] = [:]
 					var localTypes: [String: VarType] = [:]
+					var arrayParamMap: [String: String] = [:]
+
 					for (pi, pn) in fdef.params.enumerated() {
-						let av = argVals[pi]
-						if av == _stringConstMarker {
-							let s = argSCRefs[pi] >= 1 ? gStringConstants[argSCRefs[pi]] : ""
-							localVars[pn] = VariableInfo(type:.stringType, value:.string(s)); localTypes[pn] = .stringType
-						} else if av == _stringVarMarker {
-							var s = ""
-							let si = argSVRefs[pi]
-							if si == _tempArrayStringVarIndex { s = gTempStringForArray }
-							else if si >= 1 { let sn=gVarNames[si]; let (v,_,_)=resolveVarRead(varName:sn); if let sv=v,case .string(let ss)=sv{s=ss} }
-							localVars[pn] = VariableInfo(type:.stringType, value:.string(s)); localTypes[pn] = .stringType
+						if pn.hasSuffix("[]") {
+							// Array parameter — extract caller's array name from _arrayRefOpCode sentinel
+							let paramBaseName = String(pn.dropLast(2))
+							let av = argVals[pi]
+							// The array ref was pushed as a string constant containing the caller's array name
+							var callerArrayName = ""
+							if av == _stringConstMarker {
+								let si = argSCRefs[pi]
+								if si >= 1 { callerArrayName = gStringConstants[si] }
+							}
+							if callerArrayName.isEmpty {
+								let errMsg = "Parse Error: Array parameter '\(paramBaseName)' did not receive an array reference"
+								print(errMsg); delegate?.pscriptPrint(errMsg, newline: true)
+								evalErr = true; break
+							}
+							arrayParamMap[paramBaseName] = callerArrayName
 						} else {
-							localVars[pn] = VariableInfo(type:.floatType, value:.float(av)); localTypes[pn] = .floatType
+							// Scalar parameter — existing path unchanged
+							let av = argVals[pi]
+							if av == _stringConstMarker {
+								let s = argSCRefs[pi] >= 1 ? gStringConstants[argSCRefs[pi]] : ""
+								localVars[pn] = VariableInfo(type: .stringType, value: .string(s))
+								localTypes[pn] = .stringType
+							} else if av == _stringVarMarker {
+								var s = ""
+								let si = argSVRefs[pi]
+								if si == _tempArrayStringVarIndex { s = gTempStringForArray }
+								else if si >= 1 {
+									let sn = gVarNames[si]
+									let (v, _, _) = resolveVarRead(varName: sn)
+									if let sv = v, case .string(let ss) = sv { s = ss }
+								}
+								localVars[pn] = VariableInfo(type: .stringType, value: .string(s))
+								localTypes[pn] = .stringType
+							} else {
+								localVars[pn] = VariableInfo(type: .floatType, value: .float(av))
+								localTypes[pn] = .floatType
+							}
 						}
 					}
 
@@ -6773,17 +8003,18 @@ class parseEval: NSObject {
 						localVariables: localVars,
 						localTypes: localTypes,
 						returnPC: pc,
-						returnIndex: execIndex + 1,       // opcode after _funcCallOpCode block
+						returnIndex: execIndex + 1,
 						savedStack: Array(execStack),
 						savedStackLevel: savedLevel,
 						savedStringConstRefs: Array(execStringConsts),
 						savedStringVarRefs:   Array(execStringVars),
 						savedForLoopStack: gForLoopStack,
-						savedWhileLoopStack: gWhileLoopStack   // Milestone 10
+						savedWhileLoopStack: gWhileLoopStack,
+						arrayParamMap: arrayParamMap			// M58: array pass-by-reference map
 					)
 					gCallStack.append(frame)
 					gForLoopStack.removeAll()
-					gWhileLoopStack.removeAll()    // Milestone 10: fresh WHILE stack for callee
+					gWhileLoopStack.removeAll()    				// Milestone 10: fresh WHILE stack for callee
 					insideFunction = true
 
 					// Jump into function body
@@ -6909,7 +8140,79 @@ class parseEval: NSObject {
 				case ._timerOffOpCode:
 					// Invalidate timer completely (must redeclare with TIMER before TIMERON).
 					timerOff()
+				
+				case ._termOnOpCode:
+					if let d = delegate {
+						d.pscriptSerialConnect()
+					}
 
+				case ._termOffOpCode:
+					if let d = delegate {
+						d.pscriptSerialDisconnect()
+					}
+
+				case ._serialOutOpCode:
+					execIndex += 1
+					let soMode = execCodeArray[execIndex]
+					if soMode == 0 {
+						delegate?.pscriptSerialOut("", newline: true)
+					} else {
+						let soVal = execStack[execLevel]; execLevel -= 1
+						var soText = ""
+						if soVal == _stringConstMarker {
+							soText = gStringConstants[execStringConsts[execLevel + 1]]
+						} else if soVal == _stringVarMarker {
+							let si = execStringVars[execLevel + 1]
+							if si == _tempArrayStringVarIndex { soText = gTempStringForArray }
+							else if si >= 1 {
+								let sn = gVarNames[si]
+								let (v, _, _) = resolveVarRead(varName: sn)
+								soText = v?.toString() ?? ""
+							}
+						} else if soVal == floor(soVal) && abs(soVal) < Double(Int.max) {
+							soText = String(Int(soVal))
+						} else {
+							soText = String(format: "%.6g", soVal)
+						}
+						delegate?.pscriptSerialOut(soText, newline: soMode == 1)
+					}
+
+				case ._serialInOpCode:
+					execIndex += 1
+					let siVarNameIdx = execCodeArray[execIndex]
+					let siVarName = gVarNames[siVarNameIdx]
+					let siLine = delegate?.pscriptSerialIn() ?? ""
+					// M59: if break was requested during serialin, stop execution
+					if gBreakRequested {
+						gBreakRequested = false
+						timerOff()
+						if let d = delegate {
+							d.pscriptPrint("", newline: true)
+							d.pscriptPrint("Break", newline: true)
+						} else {
+							print("\nBreak")
+						}
+						return
+					}
+					if let siVT = resolveVarType(varName: siVarName) {
+						var siValue: Value = .string(siLine)
+						switch siVT {
+						case .stringType: siValue = .string(siLine)
+						case .intType:    siValue = .int(Int(siLine) ?? 0)
+						case .floatType:  siValue = .float(Double(siLine) ?? 0.0)
+						case .boolType:   siValue = .bool(!siLine.isEmpty && siLine != "0")
+						default:
+							let errMsg = "Runtime Error: SERIALIN cannot store into array variable '\(siVarName)'"
+							print(errMsg); delegate?.pscriptPrint(errMsg, newline: true)
+							evalErr = true
+						}
+						if !evalErr { storeVar(varName: siVarName, value: siValue) }
+					} else {
+						gVariableTypes[siVarName] = .stringType
+						gVariables[siVarName] = VariableInfo(type: .stringType, value: .string(siLine))
+					}
+				
+				
 				// pBasic: Graphics — POINT
 				case ._pointOpCode:
 					execIndex += 1
@@ -6972,520 +8275,692 @@ class parseEval: NSObject {
 						d.pscriptClr()
 					}
 					
-					// Milestone 19: BUFFER — switch draw/display buffer targets
-					case ._bufferOpCode:
-						execIndex += 1; let bufDrawTo  = execCodeArray[execIndex]
-						execIndex += 1; let bufDisplay = execCodeArray[execIndex]
-						if bufDrawTo == -1 {
-							// Toggle form: swap draw and display atomically
-							gDrawBuffer = 1 - gDrawBuffer
-							if let d = delegate { d.pscriptBuffer(drawTo: gDrawBuffer, display: 1 - gDrawBuffer) }
-						} else {
-							// Explicit form: BUFFER:0 or BUFFER:1
-							gDrawBuffer = bufDrawTo
-							if let d = delegate { d.pscriptBuffer(drawTo: bufDrawTo, display: bufDisplay) }
-						}
+				// Milestone 19: BUFFER — switch draw/display buffer targets
+				case ._bufferOpCode:
+					execIndex += 1; let bufDrawTo  = execCodeArray[execIndex]
+					execIndex += 1; let bufDisplay = execCodeArray[execIndex]
+					if bufDrawTo == -1 {
+						// Toggle form: swap draw and display atomically
+						gDrawBuffer = 1 - gDrawBuffer
+						if let d = delegate { d.pscriptBuffer(drawTo: gDrawBuffer, display: 1 - gDrawBuffer) }
+					} else {
+						// Explicit form: BUFFER:0 or BUFFER:1
+						gDrawBuffer = bufDrawTo
+						if let d = delegate { d.pscriptBuffer(drawTo: bufDrawTo, display: bufDisplay) }
+					}
 
-					// PEN — set global pen width and notify delegate
-					case ._penOpCode:
-						gPenSize = execStack[execLevel]; execLevel -= 1
-						if let d = delegate { d.pscriptPenSize(gPenSize) }
+				// PEN — set global pen width and notify delegate
+				case ._penOpCode:
+					gPenSize = execStack[execLevel]; execLevel -= 1
+					if let d = delegate { d.pscriptPenSize(gPenSize) }
 
-					// Milestone 21: LOAD — fileLines[] = LOAD(urlString)
-					// The URL string is on top of the eval stack.
-					// The next word in the code stream is the arrayNameIdx.
-					case ._fileLoadOpCode:
-						execIndex += 1
-						let loadArrayNameIdx = execCodeArray[execIndex]
-						let loadArrayName    = gVarNames[loadArrayNameIdx]
+				// Milestone 21: LOAD — fileLines[] = LOAD(urlString)
+				// The URL string is on top of the eval stack.
+				// The next word in the code stream is the arrayNameIdx.
+				case ._fileLoadOpCode:
+					execIndex += 1
+					let loadArrayNameIdx = execCodeArray[execIndex]
+					let loadArrayName    = gVarNames[loadArrayNameIdx]
 
-						// Resolve URL string from stack
-						let loadURLraw = execStack[execLevel]; execLevel -= 1
-						var loadURLStr = ""
-						if loadURLraw == _stringConstMarker {
-							loadURLStr = gStringConstants[execStringConsts[execLevel + 1]]
-						} else if loadURLraw == _stringVarMarker {
-							let vi = execStringVars[execLevel + 1]
-							if vi == _tempArrayStringVarIndex { loadURLStr = gTempStringForArray }
-							else if vi >= 1 { let vn=gVarNames[vi]; let (v,_,_)=resolveVarRead(varName:vn); if let sv=v,case .string(let s)=sv{loadURLStr=s} }
-						}
-						// Note: execLevel was already decremented above; string refs are at level+1
+					// Resolve URL string from stack
+					let loadURLraw = execStack[execLevel]; execLevel -= 1
+					var loadURLStr = ""
+					if loadURLraw == _stringConstMarker {
+						loadURLStr = gStringConstants[execStringConsts[execLevel + 1]]
+					} else if loadURLraw == _stringVarMarker {
+						let vi = execStringVars[execLevel + 1]
+						if vi == _tempArrayStringVarIndex { loadURLStr = gTempStringForArray }
+						else if vi >= 1 { let vn=gVarNames[vi]; let (v,_,_)=resolveVarRead(varName:vn); if let sv=v,case .string(let s)=sv{loadURLStr=s} }
+					}
+					// Note: execLevel was already decremented above; string refs are at level+1
 
-						// Verify target is a declared string array
-						guard let loadVarType = resolveVarType(varName: loadArrayName),
-							  loadVarType == .stringArrayType else {
-							if let d = delegate { d.pscriptPrint("Parse Error: \(loadArrayName) is not a String array", newline: true) }
-							else { print("Parse Error: \(loadArrayName) is not a String array") }
-							evalErr = true; break
-						}
-
-						// Resolve file URL using priority rules (spec order):
-						//   1. No path component → Documents directory
-						//   2. Relative path     → append to Documents directory
-						//   3. ~/ prefix         → expand from NSHomeDirectory()
-						//   4. Absolute path     → use as-is
-						//   5. Not found anywhere → try Bundle.main.bundlePath/bundleDemos/
-						let fileManager = FileManager.default
-						var resolvedLoadPath = ""
-						let loadTrimmed = loadURLStr.trimmingCharacters(in: .whitespaces)
-
-						func documentsDir() -> String {
-							return fileManager.urls(for: .documentDirectory, in: .userDomainMask)
-								.first?.path ?? NSHomeDirectory()
-						}
-
-						if loadTrimmed.isEmpty {
-							if let d = delegate { d.pscriptPrint("Parse Error: LOAD requires a filename", newline: true) }
-							else { print("Parse Error: LOAD requires a filename") }
-							evalErr = true; break
-						} else if loadTrimmed.hasPrefix("/") {
-							// Absolute path
-							resolvedLoadPath = loadTrimmed
-						} else if loadTrimmed.hasPrefix("~/") {
-							// Tilde expansion
-							resolvedLoadPath = (NSHomeDirectory() as NSString)
-								.appendingPathComponent(String(loadTrimmed.dropFirst(2)))
-						} else {
-							// Relative path — try Documents directory first
-							let docsPath = (documentsDir() as NSString)
-								.appendingPathComponent(loadTrimmed)
-							if fileManager.fileExists(atPath: docsPath) {
-								resolvedLoadPath = docsPath
-							} else {
-								// Fall back to Bundle demos directory
-								let bundlePath = (Bundle.main.bundlePath as NSString)
-									.appendingPathComponent("bundleDemos")
-								resolvedLoadPath = (bundlePath as NSString)
-									.appendingPathComponent(loadTrimmed)
-							}
-						}
-
-						// Check file exists
-						guard fileManager.fileExists(atPath: resolvedLoadPath) else {
-							if let d = delegate { d.pscriptPrint("Error: File not found: \(loadTrimmed)", newline: true) }
-							else { print("Error: File not found: \(loadTrimmed)") }
-							evalErr = true; break
-						}
-
-						// Open file handle for chunked reading
-						guard let loadHandle = FileHandle(forReadingAtPath: resolvedLoadPath) else {
-							if let d = delegate { d.pscriptPrint("Error: Cannot open file: \(loadTrimmed)", newline: true) }
-							else { print("Error: Cannot open file: \(loadTrimmed)") }
-							evalErr = true; break
-						}
-
-						// Read file in chunks, checking gBreakRequested between chunks
-						var loadedData = Data()
-						let loadChunkSize = 65536
-						var loadInterrupted = false
-						while true {
-							if gBreakRequested {
-								gBreakRequested = false
-								loadInterrupted = true
-								break
-							}
-							let chunk = loadHandle.readData(ofLength: loadChunkSize)
-							if chunk.isEmpty { break }
-							loadedData.append(chunk)
-							// Warn if extremely large
-							if loadedData.count > 50_000 * 80 {
-								if let d = delegate { d.pscriptPrint("Warning: File is very large — truncating at limit", newline: true) }
-								else { print("Warning: File is very large — truncating at limit") }
-								break
-							}
-						}
-						loadHandle.closeFile()
-
-						if loadInterrupted {
-							if let d = delegate { d.pscriptPrint("Warning: Load interrupted", newline: true) }
-							else { print("Warning: Load interrupted") }
-							break  // leave array unchanged on interrupt
-						}
-
-						// Decode and split on newlines
-						guard let loadString = String(data: loadedData, encoding: .utf8) ??
-											  String(data: loadedData, encoding: .isoLatin1) else {
-							if let d = delegate { d.pscriptPrint("Error: File encoding not supported", newline: true) }
-							else { print("Error: File encoding not supported") }
-							evalErr = true; break
-						}
-
-						var loadLines = loadString.components(separatedBy: .newlines)
-
-						// Discard trailing empty element produced by a final newline
-						if loadLines.last == "" { loadLines.removeLast() }
-
-						// Warn if line count exceeds threshold
-						let loadLineCount = loadLines.count
-						if loadLineCount > 50_000 {
-							if let d = delegate { d.pscriptPrint("Warning: File has \(loadLineCount) lines — exceeds 50,000 line limit", newline: true) }
-							else { print("Warning: File has \(loadLineCount) lines — exceeds 50,000 line limit") }
-						}
-
-						// Auto-REDIM if file has more lines than current array size.
-						// Size to loadLineCount + 1 so that fileLines[loadLineCount] == ""
-						// after population — giving while-loop termination code a clean
-						// empty sentinel slot beyond the last line of content.
-						gVariablesLock.lock()
-						let currentLoadSize = gStringArrays[loadArrayName]?.count ?? 0
-						gVariablesLock.unlock()
-						if loadLineCount + 1 > currentLoadSize && loadLineCount <= 50_000 {
-							_ = resizeArray(name: loadArrayName, newSize: loadLineCount + 1, type: .stringArrayType)
-						}
-
-						// Populate the string array.
-						// Empty lines between content → stored as "\n" (spec).
-						// Lines beyond array capacity are silently dropped.
-						gVariablesLock.lock()
-						let safeCount = min(loadLineCount, gStringArrays[loadArrayName]?.count ?? 0)
-						for li in 0..<safeCount {
-							let rawLine = loadLines[li]
-							gStringArrays[loadArrayName]?[li] = rawLine.isEmpty ? "\n" : rawLine
-						}
-						gVariablesLock.unlock()
-
-						// Record the loaded file path for EDIT and SAVE default directory
-						gLastLoadedFilePath = resolvedLoadPath
-
-					// Milestone 21: SAVE — SAVE urlExpr, arrayName[]
-					// Stack: URL string is on top (pushed by parser).
-					// Code stream: next word is arrayNameIdx.
-					case ._fileSaveOpCode:
-						execIndex += 1
-						let saveArrayNameIdx = execCodeArray[execIndex]
-						let saveArrayName    = gVarNames[saveArrayNameIdx]
-
-						// Pop the output URL string from the eval stack
-						let saveURLraw = execStack[execLevel]; execLevel -= 1
-						var saveURLStr = ""
-						if saveURLraw == _stringConstMarker {
-							saveURLStr = gStringConstants[execStringConsts[execLevel + 1]]
-						} else if saveURLraw == _stringVarMarker {
-							let vi = execStringVars[execLevel + 1]
-							if vi == _tempArrayStringVarIndex { saveURLStr = gTempStringForArray }
-							else if vi >= 1 { let vn=gVarNames[vi]; let (v,_,_)=resolveVarRead(varName:vn); if let sv=v,case .string(let s)=sv{saveURLStr=s} }
-						}
-
-						// Verify target is a declared string array
-						guard let saveVarType = resolveVarType(varName: saveArrayName),
-							  saveVarType == .stringArrayType else {
-							if let d = delegate { d.pscriptPrint("Parse Error: \(saveArrayName) is not a String array", newline: true) }
-							else { print("Parse Error: \(saveArrayName) is not a String array") }
-							evalErr = true; break
-						}
-
-						// Resolve output path using same priority rules as LOAD:
-						//   Absolute /path  → use as-is
-						//   ~/path          → expand from NSHomeDirectory()
-						//   relative/path   → append to directory of gLastLoadedFilePath if set,
-						//                     otherwise append to Documents directory
-						let fileManager2 = FileManager.default
-						var saveOutputPath = ""
-						let saveTrimmed = saveURLStr.trimmingCharacters(in: .whitespaces)
-
-						if saveTrimmed.isEmpty {
-							if let d = delegate { d.pscriptPrint("Parse Error: SAVE requires a filename", newline: true) }
-							else { print("Parse Error: SAVE requires a filename") }
-							evalErr = true; break
-						} else if saveTrimmed.hasPrefix("/") {
-							// Absolute path — use as-is
-							saveOutputPath = saveTrimmed
-						} else if saveTrimmed.hasPrefix("~/") {
-							// Tilde expansion
-							saveOutputPath = (NSHomeDirectory() as NSString)
-								.appendingPathComponent(String(saveTrimmed.dropFirst(2)))
-						} else {
-							// Relative path — resolve against same directory as loaded file,
-							// or Documents if no file has been loaded yet this session.
-							let baseDir: String
-							if !gLastLoadedFilePath.isEmpty {
-								baseDir = (gLastLoadedFilePath as NSString).deletingLastPathComponent
-							} else {
-								baseDir = fileManager2.urls(for: .documentDirectory, in: .userDomainMask)
-									.first?.path ?? NSHomeDirectory()
-							}
-							saveOutputPath = (baseDir as NSString).appendingPathComponent(saveTrimmed)
-						}
-
-						// Build output string from array.
-						// Skip elements == "" (empty string — unwritten slots).
-						// Write elements == "\n" as blank lines.
-						// Write all other elements followed by \n.
-						gVariablesLock.lock()
-						let saveArr = gStringArrays[saveArrayName] ?? []
-						gVariablesLock.unlock()
-
-						var saveContent = ""
-						var saveInterrupted = false
-						for elem in saveArr {
-							if gBreakRequested {
-								gBreakRequested = false
-								saveInterrupted = true
-								break
-							}
-							if elem == "" { continue }          // unwritten slot — skip
-							if elem == "\n" { saveContent += "\n"; continue }  // blank line
-							saveContent += elem + "\n"
-						}
-
-						if saveInterrupted {
-							if let d = delegate { d.pscriptPrint("Warning: Save interrupted — original file unchanged", newline: true) }
-							else { print("Warning: Save interrupted — original file unchanged") }
-							break  // atomic write not started — original safe
-						}
-
-						// Write atomically — temp file renamed on success, original never corrupted
-						do {
-							let saveURL = URL(fileURLWithPath: saveOutputPath)
-							try saveContent.write(to: saveURL, atomically: true, encoding: .utf8)
-							gLastSaveFilePath = saveOutputPath
-						} catch {
-							if let d = delegate { d.pscriptPrint("Error: Save failed — \(error.localizedDescription)", newline: true) }
-							else { print("Error: Save failed — \(error.localizedDescription)") }
-							evalErr = true; break
-						}
-
-					// Milestone 36: MOUSEAT(X|Y|B) — current mouse position / button state
-					// axis: 0=X  1=Y  2=B(utton)
-					case ._mouseatOpCode:
-						execIndex += 1
-						let mouseAxis = execCodeArray[execIndex]
-						execLevel += 1
-						execStack[execLevel] = delegate?.pscriptMouseAt(axis: mouseAxis) ?? 0.0
-
-					// Milestone 27: SAMPLE(x, y, channel, sampleSize) — pixel readback
-					// Bytecode: _sampleOpCode, argCount (always 4)
-					// Stack on entry (bottom→top): x, y, channel, sampleSize
-					// channel: 0=Red 1=Green 2=Blue 3=Alpha
-					// Returns normalised 0.0–1.0 value pushed onto stack.
-					case ._sampleOpCode:
-						execIndex += 1
-						let sampleArgCount = execCodeArray[execIndex]
-						var sampleResult = 0.0
-						if sampleArgCount == 4 {
-							let sampleSize    = execStack[execLevel];          execLevel -= 1
-							let sampleChan    = Int(execStack[execLevel]);     execLevel -= 1
-							let sampleY       = Int(execStack[execLevel]);     execLevel -= 1
-							let sampleX       = Int(execStack[execLevel]);     execLevel -= 1
-							if let d = delegate {
-								sampleResult = d.pscriptSample(x: sampleX, y: sampleY,
-															   channel: sampleChan,
-															   sampleSize: sampleSize)
-							}
-						} else {
-							// Legacy 3-arg form — consume and return 0
-							let _sc = Int(execStack[execLevel]); execLevel -= 1
-							let _sy = Int(execStack[execLevel]); execLevel -= 1
-							let _sx = Int(execStack[execLevel]); execLevel -= 1
-							_ = (_sc, _sy, _sx)
-						}
-						execLevel += 1
-						execStack[execLevel] = sampleResult
+					// Verify target is a declared string array
+					guard let loadVarType = resolveVarType(varName: loadArrayName),
+						  loadVarType == .stringArrayType else {
+						if let d = delegate { d.pscriptPrint("Parse Error: \(loadArrayName) is not a String array", newline: true) }
+						else { print("Parse Error: \(loadArrayName) is not a String array") }
+						evalErr = true; break
+					}
 					
-					// Milestone 38: DIST(x1, y1, x2, y2) — Euclidean distance
-					case ._distOpCode:
-						execIndex += 1
-						let distY2 = execStack[execLevel];     execLevel -= 1
-						let distX2 = execStack[execLevel];     execLevel -= 1
-						let distY1 = execStack[execLevel];     execLevel -= 1
-						let distX1 = execStack[execLevel];     execLevel -= 1
-						execLevel += 1
-						execStack[execLevel] = hypot(distX2 - distX1, distY2 - distY1)
-					
-					// Milestone 28: SAY — speak string via AVSpeechSynthesizer
-					// String expression is on top of eval stack.
-					case ._sayOpCode:
-						let sayRaw = execStack[execLevel]
-						var sayText = ""
-						if sayRaw == _stringConstMarker {
-							sayText = gStringConstants[execStringConsts[execLevel]]
-						} else if sayRaw == _stringVarMarker {
-							let vi = execStringVars[execLevel]
-							if vi == _tempArrayStringVarIndex { sayText = gTempStringForArray }
-							else { let vn = gVarNames[vi]; let (v,_,_) = resolveVarRead(varName: vn); if let sv = v, case .string(let s) = sv { sayText = s } }
-						} else {
-							// Numeric — convert to string
-							sayText = sayRaw == floor(sayRaw) && abs(sayRaw) < Double(Int.max)
-								? String(Int(sayRaw)) : String(format: "%.6g", sayRaw)
-						}
-						execLevel -= 1
-						if let d = delegate {
-							d.pscriptSay(sayText)
-						} else {
-							// CLI fallback: print to stdout with [SAY] prefix
-							print("[SAY] \(sayText)")
-						}
-					
-					// Milestone 28: SAY STOP — halt speech immediately
-					case ._sayStopOpCode:
-						if let d = delegate {
-							d.pscriptSayStop()
-						}
-					
-					// PLAY(id [, volume [, urlString]]) — fire-and-forget sound playback
-					case ._playOpCode:
-						execIndex += 1
-						let playMask = execCodeArray[execIndex]
+					// Resolve file URL using Path Rules
+					let fileManager = FileManager.default
+					let loadTrimmed = loadURLStr.trimmingCharacters(in: .whitespaces)
 
-						// Collect args from stack — pushed id first (deepest), urlString last (top)
-						var playURLStr  = ""
-						var playVolume  = -1.0   // sentinel: use last set volume
-						var playID      = 0
+					if loadTrimmed.isEmpty {
+						if let d = delegate { d.pscriptPrint("Parse Error: LOAD requires a filename", newline: true) }
+						else { print("Parse Error: LOAD requires a filename") }
+						evalErr = true; break
+					}
 
-						// Pop in reverse push order: urlString first if present
-						if (playMask >> 2) & 1 == 1 {
-							let urlRaw = execStack[execLevel]
-							if urlRaw == _stringConstMarker {
-								playURLStr = gStringConstants[execStringConsts[execLevel]]
-							} else if urlRaw == _stringVarMarker {
-								let vi = execStringVars[execLevel]
-								if vi == _tempArrayStringVarIndex { playURLStr = gTempStringForArray }
-								else { let vn=gVarNames[vi]; let (v,_,_)=resolveVarRead(varName:vn); if let sv=v,case .string(let s)=sv{playURLStr=s} }
-							}
-							execLevel -= 1
-						}
-						if (playMask >> 1) & 1 == 1 {
-							playVolume = execStack[execLevel]; execLevel -= 1
-						}
-						if (playMask >> 0) & 1 == 1 {
-							playID = Int(execStack[execLevel]); execLevel -= 1
-						}
+					let resolvedLoadPath = resolveBasPath(loadTrimmed).path
 
-						if let d = delegate {
-							d.pscriptPlay(id: playID, volume: playVolume, urlString: playURLStr)
-						} else {
-							// CLI: use global registry
-							cliPlay(id: playID, volume: playVolume, urlString: playURLStr)
-						}
+					// Check file exists
+					guard fileManager.fileExists(atPath: resolvedLoadPath) else {
+						if let d = delegate { d.pscriptPrint("Error: File not found: \(loadTrimmed)", newline: true) }
+						else { print("Error: File not found: \(loadTrimmed)") }
+						evalErr = true; break
+					}
 
-					// Milestone 33: SOUND(midiNote, duration, volume)
-					case ._soundOpCode:
-						let sndVolume  = execStack[execLevel];          execLevel -= 1
-						let sndDur     = execStack[execLevel];          execLevel -= 1
-						let sndNote    = Int(execStack[execLevel]);     execLevel -= 1
-						// Validate range
-						guard sndNote >= 0 && sndNote <= 127 else {
-							let sndErr = "Parser: MIDI note out of range [0-127]: \(sndNote)"
-							if let d = delegate { d.pscriptPrint(sndErr, newline: true) }
-							else { print(sndErr) }
+					// Open file handle for chunked reading
+					guard let loadHandle = FileHandle(forReadingAtPath: resolvedLoadPath) else {
+						if let d = delegate { d.pscriptPrint("Error: Cannot open file: \(loadTrimmed)", newline: true) }
+						else { print("Error: Cannot open file: \(loadTrimmed)") }
+						evalErr = true; break
+					}
+
+					// Read file in chunks, checking gBreakRequested between chunks
+					var loadedData = Data()
+					let loadChunkSize = 65536
+					var loadInterrupted = false
+					while true {
+						if gBreakRequested {
+							gBreakRequested = false
+							loadInterrupted = true
 							break
 						}
-						let sndDurClamped = min(max(sndDur, 0.0), 10.0)
-						let sndVolClamped = min(max(sndVolume, 0.0), 1.0)
+						let chunk = loadHandle.readData(ofLength: loadChunkSize)
+						if chunk.isEmpty { break }
+						loadedData.append(chunk)
+						// Warn if extremely large
+						if loadedData.count > 50_000 * 80 {
+							if let d = delegate { d.pscriptPrint("Warning: File is very large — truncating at limit", newline: true) }
+							else { print("Warning: File is very large — truncating at limit") }
+							break
+						}
+					}
+					loadHandle.closeFile()
+
+					if loadInterrupted {
+						if let d = delegate { d.pscriptPrint("Warning: Load interrupted", newline: true) }
+						else { print("Warning: Load interrupted") }
+						break  // leave array unchanged on interrupt
+					}
+
+					// Decode and split on newlines
+					guard let loadString = String(data: loadedData, encoding: .utf8) ??
+										  String(data: loadedData, encoding: .isoLatin1) else {
+						if let d = delegate { d.pscriptPrint("Error: File encoding not supported", newline: true) }
+						else { print("Error: File encoding not supported") }
+						evalErr = true; break
+					}
+
+					var loadLines = loadString.components(separatedBy: .newlines)
+
+					// Discard trailing empty element produced by a final newline
+					if loadLines.last == "" { loadLines.removeLast() }
+
+					// Warn if line count exceeds threshold
+					let loadLineCount = loadLines.count
+					if loadLineCount > 50_000 {
+						if let d = delegate { d.pscriptPrint("Warning: File has \(loadLineCount) lines — exceeds 50,000 line limit", newline: true) }
+						else { print("Warning: File has \(loadLineCount) lines — exceeds 50,000 line limit") }
+					}
+
+					// Auto-REDIM if file has more lines than current array size.
+					// Size to loadLineCount + 1 so that fileLines[loadLineCount] == ""
+					// after population — giving while-loop termination code a clean
+					// empty sentinel slot beyond the last line of content.
+					gVariablesLock.lock()
+					let currentLoadSize = gStringArrays[loadArrayName]?.count ?? 0
+					gVariablesLock.unlock()
+					if loadLineCount + 1 > currentLoadSize && loadLineCount <= 50_000 {
+						_ = resizeArray(name: loadArrayName, newSize: loadLineCount + 1, type: .stringArrayType)
+					}
+
+					// Populate the string array.
+					// Empty lines between content → stored as "\n" (spec).
+					// Lines beyond array capacity are silently dropped.
+					gVariablesLock.lock()
+					let safeCount = min(loadLineCount, gStringArrays[loadArrayName]?.count ?? 0)
+					for li in 0..<safeCount {
+						let rawLine = loadLines[li]
+						gStringArrays[loadArrayName]?[li] = rawLine.isEmpty ? "\n" : rawLine
+					}
+					gVariablesLock.unlock()
+
+					// Record the loaded file path for EDIT and SAVE default directory
+					gLastLoadedFilePath = resolvedLoadPath
+
+				// Milestone 21: SAVE — SAVE urlExpr, arrayName[]
+				// Stack: URL string is on top (pushed by parser).
+				// Code stream: next word is arrayNameIdx.
+				case ._fileSaveOpCode:
+					execIndex += 1
+					let saveArrayNameIdx = execCodeArray[execIndex]
+					let saveArrayName    = gVarNames[saveArrayNameIdx]
+
+					// Pop the output URL string from the eval stack
+					let saveURLraw = execStack[execLevel]; execLevel -= 1
+					var saveURLStr = ""
+					if saveURLraw == _stringConstMarker {
+						saveURLStr = gStringConstants[execStringConsts[execLevel + 1]]
+					} else if saveURLraw == _stringVarMarker {
+						let vi = execStringVars[execLevel + 1]
+						if vi == _tempArrayStringVarIndex { saveURLStr = gTempStringForArray }
+						else if vi >= 1 { let vn=gVarNames[vi]; let (v,_,_)=resolveVarRead(varName:vn); if let sv=v,case .string(let s)=sv{saveURLStr=s} }
+					}
+
+					// Verify target is a declared string array
+					guard let saveVarType = resolveVarType(varName: saveArrayName),
+						  saveVarType == .stringArrayType else {
+						if let d = delegate { d.pscriptPrint("Parse Error: \(saveArrayName) is not a String array", newline: true) }
+						else { print("Parse Error: \(saveArrayName) is not a String array") }
+						evalErr = true; break
+					}
+
+					// Resolve output path using same priority rules as LOAD
+					let fileManager2 = FileManager.default
+					let saveTrimmed = saveURLStr.trimmingCharacters(in: .whitespaces)
+
+					if saveTrimmed.isEmpty {
+						if let d = delegate { d.pscriptPrint("Parse Error: SAVE requires a filename", newline: true) }
+						else { print("Parse Error: SAVE requires a filename") }
+						evalErr = true; break
+					}
+
+					let saveOutputPath = resolveBasPath(saveTrimmed).path
+
+					// Build output string from array.
+					// Skip elements == "" (empty string — unwritten slots).
+					// Write elements == "\n" as blank lines.
+					// Write all other elements followed by \n.
+					gVariablesLock.lock()
+					let saveArr = gStringArrays[saveArrayName] ?? []
+					gVariablesLock.unlock()
+
+					var saveContent = ""
+					var saveInterrupted = false
+					for elem in saveArr {
+						if gBreakRequested {
+							gBreakRequested = false
+							saveInterrupted = true
+							break
+						}
+						if elem == "" { continue }          // unwritten slot — skip
+						if elem == "\n" { saveContent += "\n"; continue }  // blank line
+						saveContent += elem + "\n"
+					}
+
+					if saveInterrupted {
+						if let d = delegate { d.pscriptPrint("Warning: Save interrupted — original file unchanged", newline: true) }
+						else { print("Warning: Save interrupted — original file unchanged") }
+						break  // atomic write not started — original safe
+					}
+
+					// Write atomically — temp file renamed on success, original never corrupted
+					// Create intermediate directories if needed
+					let saveDirURL = URL(fileURLWithPath: saveOutputPath)
+						.deletingLastPathComponent()
+					try? fileManager2.createDirectory(
+						at: saveDirURL, withIntermediateDirectories: true)
+
+					// Write atomically — temp file renamed on success, original never corrupted
+					do {
+						let saveURL = URL(fileURLWithPath: saveOutputPath)
+						try saveContent.write(to: saveURL, atomically: true, encoding: .utf8)
+						gLastSaveFilePath = saveOutputPath
+					} catch {
+						if let d = delegate { d.pscriptPrint("Error: Save failed — \(error.localizedDescription)", newline: true) }
+						else { print("Error: Save failed — \(error.localizedDescription)") }
+						evalErr = true; break
+					}
+
+				// Milestone 36: MOUSEAT(X|Y|B) — current mouse position / button state
+				// axis: 0=X  1=Y  2=B(utton)
+				case ._mouseatOpCode:
+					execIndex += 1
+					let mouseAxis = execCodeArray[execIndex]
+					execLevel += 1
+					execStack[execLevel] = delegate?.pscriptMouseAt(axis: mouseAxis) ?? 0.0
+
+				// Milestone 27: SAMPLE(x, y, channel, sampleSize) — pixel readback
+				// Bytecode: _sampleOpCode, argCount (always 4)
+				// Stack on entry (bottom→top): x, y, channel, sampleSize
+				// channel: 0=Red 1=Green 2=Blue 3=Alpha
+				// Returns normalised 0.0–1.0 value pushed onto stack.
+				case ._sampleOpCode:
+					execIndex += 1
+					let sampleArgCount = execCodeArray[execIndex]
+					var sampleResult = 0.0
+					if sampleArgCount == 4 {
+						let sampleSize    = execStack[execLevel];          execLevel -= 1
+						let sampleChan    = Int(execStack[execLevel]);     execLevel -= 1
+						let sampleY       = Int(execStack[execLevel]);     execLevel -= 1
+						let sampleX       = Int(execStack[execLevel]);     execLevel -= 1
 						if let d = delegate {
-							d.pscriptSound(midiNote: sndNote,
-										   duration: sndDurClamped,
-										   volume:   sndVolClamped)
-						} else {
-							cliSound(midiNote: sndNote, duration: sndDurClamped, volume: sndVolClamped)
+							sampleResult = d.pscriptSample(x: sampleX, y: sampleY,
+														   channel: sampleChan,
+														   sampleSize: sampleSize)
 						}
+					} else {
+						// Legacy 3-arg form — consume and return 0
+						let _sc = Int(execStack[execLevel]); execLevel -= 1
+						let _sy = Int(execStack[execLevel]); execLevel -= 1
+						let _sx = Int(execStack[execLevel]); execLevel -= 1
+						_ = (_sc, _sy, _sx)
+					}
+					execLevel += 1
+					execStack[execLevel] = sampleResult
+				
+				// Milestone 38: DIST(x1, y1, x2, y2) — Euclidean distance
+				case ._distOpCode:
+					execIndex += 1
+					let distY2 = execStack[execLevel];     execLevel -= 1
+					let distX2 = execStack[execLevel];     execLevel -= 1
+					let distY1 = execStack[execLevel];     execLevel -= 1
+					let distX1 = execStack[execLevel];     execLevel -= 1
+					execLevel += 1
+					execStack[execLevel] = hypot(distX2 - distX1, distY2 - distY1)
+				
+				// Milestone 46: CIRCLE(x, y, radius) — fill + stroke using gFillColor/gTextColor/gPenSize
+				case ._circleOpCode:
+					let circRadius = Int(execStack[execLevel]);     execLevel -= 1
+					let circY      = Int(execStack[execLevel]);     execLevel -= 1
+					let circX      = Int(execStack[execLevel]);     execLevel -= 1
+					let (fr, fg, fb, fa) = gFillColor
+					let (tr, tg, tb, ta) = gTextColor
+					if let d = delegate {
+						d.pscriptCircle(x: circX, y: circY, radius: circRadius,
+										fillR: fr, fillG: fg, fillB: fb, fillA: fa,
+										strokeR: tr, strokeG: tg, strokeB: tb, strokeA: ta,
+										penSize: gPenSize)
+					}
 
-					// Milestone 35: FILL(r, g, b, a) — set persistent text background colour
-					case ._fillOpCode:
-						let fillA = execStack[execLevel];     execLevel -= 1
-						let fillB = execStack[execLevel];     execLevel -= 1
-						let fillG = execStack[execLevel];     execLevel -= 1
-						let fillR = execStack[execLevel];     execLevel -= 1
-						let fr = min(max(fillR, 0.0), 1.0)
-						let fg = min(max(fillG, 0.0), 1.0)
-						let fb = min(max(fillB, 0.0), 1.0)
-						let fa = min(max(fillA, 0.0), 1.0)
-						gFillColor = (fr, fg, fb, fa)
-						delegate?.pscriptFill(r: fr, g: fg, b: fb, a: fa)
+				// Milestone 47: RECT(x1, y1, x2, y2)
+				case ._rectOpCode:
+					let rectY2 = Int(execStack[execLevel]);     execLevel -= 1
+					let rectX2 = Int(execStack[execLevel]);     execLevel -= 1
+					let rectY1 = Int(execStack[execLevel]);     execLevel -= 1
+					let rectX1 = Int(execStack[execLevel]);     execLevel -= 1
+					let (fr, fg, fb, fa) = gFillColor
+					let (tr, tg, tb, ta) = gTextColor
+					if let d = delegate {
+						d.pscriptRect(x1: rectX1, y1: rectY1, x2: rectX2, y2: rectY2,
+									  fillR: fr, fillG: fg, fillB: fb, fillA: fa,
+									  strokeR: tr, strokeG: tg, strokeB: tb, strokeA: ta,
+									  penSize: gPenSize)
+					}
 
-					// Milestone 34: TEXT(r, g, b, a) — set persistent text foreground colour
-					case ._textColorOpCode:
-						let tcA = execStack[execLevel];     execLevel -= 1
-						let tcB = execStack[execLevel];     execLevel -= 1
-						let tcG = execStack[execLevel];     execLevel -= 1
-						let tcR = execStack[execLevel];     execLevel -= 1
-						let tr = min(max(tcR, 0.0), 1.0)
-						let tg = min(max(tcG, 0.0), 1.0)
-						let tb = min(max(tcB, 0.0), 1.0)
-						let ta = min(max(tcA, 0.0), 1.0)
-						gTextColor = (tr, tg, tb, ta)
-						delegate?.pscriptTextColor(r: tr, g: tg, b: tb, a: ta)
+				// Milestone 48: ROUNDRECT(x1, y1, x2, y2, cornerRadius)
+				case ._roundRectOpCode:
+					let rrRadius = Int(execStack[execLevel]);     execLevel -= 1
+					let rrY2     = Int(execStack[execLevel]);     execLevel -= 1
+					let rrX2     = Int(execStack[execLevel]);     execLevel -= 1
+					let rrY1     = Int(execStack[execLevel]);     execLevel -= 1
+					let rrX1     = Int(execStack[execLevel]);     execLevel -= 1
+					let (fr, fg, fb, fa) = gFillColor
+					let (tr, tg, tb, ta) = gTextColor
+					if let d = delegate {
+						d.pscriptRoundRect(x1: rrX1, y1: rrY1, x2: rrX2, y2: rrY2,
+										   radius: rrRadius,
+										   fillR: fr, fillG: fg, fillB: fb, fillA: fa,
+										   strokeR: tr, strokeG: tg, strokeB: tb, strokeA: ta,
+										   penSize: gPenSize)
+					}
+				
+				// Milestone 49: STAMP(x, y, spriteID)
+				case ._stampOpCode:
+					let stampID = Int(execStack[execLevel]);     execLevel -= 1
+					let stampY  = Int(execStack[execLevel]);     execLevel -= 1
+					let stampX  = Int(execStack[execLevel]);     execLevel -= 1
+					if let d = delegate {
+						d.pscriptStamp(x: stampX, y: stampY, spriteID: stampID)
+					}
+				
+				// Milestone 51: CLONE(id, x1, y1, x2, y2)
+				// Dispatched sync to main — canvas must be committed before capture.
+				case ._cloneOpCode:
+					execIndex += 1
+					let _ = execCodeArray[execIndex]           // argCount (always 5)
+					let cloneY2 = Int(execStack[execLevel]); execLevel -= 1
+					let cloneX2 = Int(execStack[execLevel]); execLevel -= 1
+					let cloneY1 = Int(execStack[execLevel]); execLevel -= 1
+					let cloneX1 = Int(execStack[execLevel]); execLevel -= 1
+					let cloneID = Int(execStack[execLevel]); execLevel -= 1
+					if let d = delegate {
+						d.pscriptClone(id: cloneID, x1: cloneX1, y1: cloneY1,
+									   x2: cloneX2, y2: cloneY2)
+					}
+				
+				// Milestone 50: FLOOD(x, y, R, G, B, A) — scanline flood fill
+				case ._floodOpCode:
+					let floodA = execStack[execLevel];         execLevel -= 1
+					let floodB = execStack[execLevel];         execLevel -= 1
+					let floodG = execStack[execLevel];         execLevel -= 1
+					let floodR = execStack[execLevel];         execLevel -= 1
+					let floodY = Int(execStack[execLevel]);    execLevel -= 1
+					let floodX = Int(execStack[execLevel]);    execLevel -= 1
+					let fr = min(max(floodR, 0.0), 1.0)
+					let fg = min(max(floodG, 0.0), 1.0)
+					let fb = min(max(floodB, 0.0), 1.0)
+					let fa = min(max(floodA, 0.0), 1.0)
+					if let d = delegate {
+						d.pscriptFlood(x: floodX, y: floodY, r: fr, g: fg, b: fb, a: fa)
+					}
+				
+				// Milestone 52: MEOW — play a random meow WAV via PLAY infrastructure
+				case ._meowOpCode:
+				if let d = delegate {
+						d.pscriptMeow()
+					}
+					// CLI: no-op (bundle sounds not available in CLI build)
+				
+				case ._stringNOpCode:
+					execIndex += 1  // consume argCount (2)
+					let snRaw = execStack[execLevel]
+					var snPattern = ""
+					if snRaw == _stringConstMarker {
+						snPattern = gStringConstants[execStringConsts[execLevel]]
+					} else if snRaw == _stringVarMarker {
+						let vi = execStringVars[execLevel]
+						if vi == _tempArrayStringVarIndex { snPattern = gTempStringForArray }
+						else { let vn = gVarNames[vi]; let (v,_,_) = resolveVarRead(varName: vn); if let sv = v, case .string(let s) = sv { snPattern = s } }
+					}
+					execLevel -= 1
+					let snCount = max(0, min(1024, Int(execStack[execLevel])))
+					execLevel -= 1
+					var snResult = ""
+					if !snPattern.isEmpty && snCount > 0 {
+						while snResult.count < snCount { snResult += snPattern }
+						snResult = String(snResult.prefix(snCount))
+					}
+					let snSI = storeStringConst(value: snResult)
+					execLevel += 1
+					execStack[execLevel] = _stringConstMarker
+					execStringConsts[execLevel] = snSI
+				
+				// Milestone 43: INSTR(startAt, haystack$, needle$) — 0-based, case-sensitive
+				// Stack (deepest→top): startAt, haystack$, needle$
+				case ._instrOpCode:
+					execIndex += 1  // consume argCount (3)
 
-					// Milestone 30: SPRITE(id, x, y, rotation, scale, hidden, alpha, imageURL)
-					// Bytecode: _spriteOpCode, presentMask, argCount
-					// presentMask: bit N set = argument N was supplied and is on the stack.
-					// Args are pushed in order (0=id first, 7=imageURL last) — pop in reverse.
-					// Absent args use defaults: x/y/rot/scale/alpha → sentinel, hidden → -1, imageURL → ""
-					case ._spriteOpCode:
-						execIndex += 1
-						let sprMask  = execCodeArray[execIndex]
-						execIndex += 1
-						let _        = execCodeArray[execIndex]   // argCount (unused here)
-						let sentinel30 = Double.greatestFiniteMagnitude
+					// Pop needle$ (top)
+					let instrNeedleRaw = execStack[execLevel]
+					var instrNeedle = ""
+					if instrNeedleRaw == _stringConstMarker {
+						instrNeedle = gStringConstants[execStringConsts[execLevel]]
+					} else if instrNeedleRaw == _stringVarMarker {
+						let vi = execStringVars[execLevel]
+						if vi == _tempArrayStringVarIndex { instrNeedle = gTempStringForArray }
+						else { let vn = gVarNames[vi]; let (v,_,_) = resolveVarRead(varName: vn); if let sv = v, case .string(let s) = sv { instrNeedle = s } }
+					}
+					execLevel -= 1
 
-						// Collect present args from stack into a fixed array indexed by slot.
-						// Stack order: id pushed first → deepest; imageURL pushed last → top.
-						// We pop from top (slot 7) down to slot 0.
-						var slotVal  = [Double](repeating: sentinel30, count: 8)
-						var slotSC   = [Int](repeating: 0, count: 8)
-						var slotSV   = [Int](repeating: 0, count: 8)
+					// Pop haystack$
+					let instrHayRaw = execStack[execLevel]
+					var instrHay = ""
+					if instrHayRaw == _stringConstMarker {
+						instrHay = gStringConstants[execStringConsts[execLevel]]
+					} else if instrHayRaw == _stringVarMarker {
+						let vi = execStringVars[execLevel]
+						if vi == _tempArrayStringVarIndex { instrHay = gTempStringForArray }
+						else { let vn = gVarNames[vi]; let (v,_,_) = resolveVarRead(varName: vn); if let sv = v, case .string(let s) = sv { instrHay = s } }
+					}
+					execLevel -= 1
 
-						for slotIndex in stride(from: 7, through: 0, by: -1) {
-							guard (sprMask >> slotIndex) & 1 == 1 else { continue }
-							slotVal[slotIndex] = execStack[execLevel]
-							slotSC[slotIndex]  = execStringConsts[execLevel]
-							slotSV[slotIndex]  = execStringVars[execLevel]
-							execLevel -= 1
+					// Pop startAt
+					let instrStart = Int(execStack[execLevel])
+					execLevel -= 1
+
+					// Search — empty needle or out-of-bounds startAt → -1
+					var instrResult = -1
+					if !instrNeedle.isEmpty && instrStart >= 0 && instrStart < instrHay.count {
+						let hayChars = instrHay
+						let startIdx = hayChars.index(hayChars.startIndex, offsetBy: instrStart)
+						if let found = hayChars.range(of: instrNeedle, range: startIdx..<hayChars.endIndex) {
+							instrResult = hayChars.distance(from: hayChars.startIndex, to: found.lowerBound)
 						}
+					}
+					execLevel += 1
+					execStack[execLevel] = Double(instrResult)
+				
+				// Milestone 44: SORT [-rev] array[] — in-place sort, "" entries preserved at tail
+				case ._sortOpCode:
+					execIndex += 1; let sortNameIdx  = execCodeArray[execIndex]
+					execIndex += 1; let sortReversed = execCodeArray[execIndex] != 0
+					let sortName = gVarNames[sortNameIdx]
+					guard let sortVT = resolveVarType(varName: sortName) else { break }
+					gVariablesLock.lock()
+					switch sortVT {
+					case .stringArrayType:
+						if var arr = gStringArrays[sortName] {
+							pbasicSortStringArray(&arr, reversed: sortReversed)
+							gStringArrays[sortName] = arr
+						}
+					case .intArrayType:
+						gIntArrays[sortName]?.sort { sortReversed ? $0 > $1 : $0 < $1 }
+					case .floatArrayType:
+						gFloatArrays[sortName]?.sort { sortReversed ? $0 > $1 : $0 < $1 }
+					default:
+						gVariablesLock.unlock()
+						let sortErr = "Parser: SORT requires a 1D array"
+						if let d = delegate { d.pscriptPrint(sortErr, newline: true) }
+						else { print(sortErr) }
+						break
+					}
+					gVariablesLock.unlock()
 
-						// Resolve imageURL (slot 7) — string or empty
-						var sprImageURL = ""
-						let urlRaw = slotVal[7]
+				// Milestone 45: SORTLEN [-rev] array[] — sort strings by length, "" at tail
+				case ._sortLenOpCode:
+					execIndex += 1; let slNameIdx  = execCodeArray[execIndex]
+					execIndex += 1; let slReversed = execCodeArray[execIndex] != 0
+					let slName = gVarNames[slNameIdx]
+					guard let slVT = resolveVarType(varName: slName) else { break }
+					guard slVT == .stringArrayType else {
+						let slErr = "Parser: SORTLEN requires a String array"
+						if let d = delegate { d.pscriptPrint(slErr, newline: true) }
+						else { print(slErr) }
+						break
+					}
+					gVariablesLock.lock()
+					if var arr = gStringArrays[slName] {
+						pbasicSortStringArrayByLength(&arr, reversed: slReversed)
+						gStringArrays[slName] = arr
+					}
+					gVariablesLock.unlock()
+				
+				// Milestone 28: SAY — speak string via AVSpeechSynthesizer
+				// String expression is on top of eval stack.
+				case ._sayOpCode:
+					let sayRaw = execStack[execLevel]
+					var sayText = ""
+					if sayRaw == _stringConstMarker {
+						sayText = gStringConstants[execStringConsts[execLevel]]
+					} else if sayRaw == _stringVarMarker {
+						let vi = execStringVars[execLevel]
+						if vi == _tempArrayStringVarIndex { sayText = gTempStringForArray }
+						else { let vn = gVarNames[vi]; let (v,_,_) = resolveVarRead(varName: vn); if let sv = v, case .string(let s) = sv { sayText = s } }
+					} else {
+						// Numeric — convert to string
+						sayText = sayRaw == floor(sayRaw) && abs(sayRaw) < Double(Int.max)
+							? String(Int(sayRaw)) : String(format: "%.6g", sayRaw)
+					}
+					execLevel -= 1
+					if let d = delegate {
+						d.pscriptSay(sayText)
+					} else {
+						// CLI fallback: print to stdout with [SAY] prefix
+						print("[SAY] \(sayText)")
+					}
+				
+				// Milestone 28: SAY STOP — halt speech immediately
+				case ._sayStopOpCode:
+					if let d = delegate {
+						d.pscriptSayStop()
+					}
+				
+				// PLAY(id [, volume [, urlString]]) — fire-and-forget sound playback
+				case ._playOpCode:
+					execIndex += 1
+					let playMask = execCodeArray[execIndex]
+
+					// Collect args from stack — pushed id first (deepest), urlString last (top)
+					var playURLStr  = ""
+					var playVolume  = -1.0   // sentinel: use last set volume
+					var playID      = 0
+
+					// Pop in reverse push order: urlString first if present
+					if (playMask >> 2) & 1 == 1 {
+						let urlRaw = execStack[execLevel]
 						if urlRaw == _stringConstMarker {
-							sprImageURL = gStringConstants[slotSC[7]]
+							playURLStr = gStringConstants[execStringConsts[execLevel]]
 						} else if urlRaw == _stringVarMarker {
-							let vi = slotSV[7]
-							if vi == _tempArrayStringVarIndex { sprImageURL = gTempStringForArray }
-							else { let vn = gVarNames[vi]; let (v,_,_) = resolveVarRead(varName: vn); if let sv = v, case .string(let s) = sv { sprImageURL = s } }
+							let vi = execStringVars[execLevel]
+							if vi == _tempArrayStringVarIndex { playURLStr = gTempStringForArray }
+							else { let vn=gVarNames[vi]; let (v,_,_)=resolveVarRead(varName:vn); if let sv=v,case .string(let s)=sv{playURLStr=s} }
 						}
-						// If slot 7 absent, sprImageURL stays ""
-
-						// Resolve numeric slots (0=id, 1=x, 2=y, 3=rot, 4=scale, 5=hidden, 6=alpha)
-						let sprID       = Int(slotVal[0])
-						let sprX        = slotVal[1]   // sentinel if absent
-						let sprY        = slotVal[2]
-						let sprRotation = slotVal[3]
-						let sprScale    = slotVal[4]
-						let sprHiddenD  = slotVal[5]
-						let sprAlpha    = slotVal[6]
-						let sprHidden   = (sprMask >> 5) & 1 == 0 ? -1 : Int(sprHiddenD)
-
-						if let d = delegate {
-							d.pscriptSprite(id: sprID,
-											x: sprX, y: sprY,
-											rotation: sprRotation,
-											scale: sprScale,
-											hidden: sprHidden,
-											alpha: sprAlpha,
-											imageURL: sprImageURL)
-						}
-
-					// Milestone 30: GET(spriteID, x1, y1, x2, y2)
-					// Bytecode: _getOpCode, 5
-					// Stack push order: id, x1, y1, x2, y2  →  pop y2 first, id last.
-					case ._getOpCode:
-						execIndex += 1
-						let _ = execCodeArray[execIndex]   // argCount (always 5)
-						let getY2 = Int(execStack[execLevel]); execLevel -= 1
-						let getX2 = Int(execStack[execLevel]); execLevel -= 1
-						let getY1 = Int(execStack[execLevel]); execLevel -= 1
-						let getX1 = Int(execStack[execLevel]); execLevel -= 1
-						let getID = Int(execStack[execLevel]); execLevel -= 1
-						if let d = delegate {
-							d.pscriptSpriteGet(id: getID, x1: getX1, y1: getY1, x2: getX2, y2: getY2)
-						}
+						execLevel -= 1
+					}
+					// Apply path resolution to sound file URL
+					if !playURLStr.isEmpty {
+						playURLStr = resolveBasPath(playURLStr).path
+					}
+					if (playMask >> 1) & 1 == 1 {
+						playVolume = execStack[execLevel]; execLevel -= 1
+					}
+					if (playMask >> 0) & 1 == 1 {
+						playID = Int(execStack[execLevel]); execLevel -= 1
+					}
 					
+					if let d = delegate {
+						d.pscriptPlay(id: playID, volume: playVolume, urlString: playURLStr)
+					} else {
+						// CLI: use global registry
+						cliPlay(id: playID, volume: playVolume, urlString: playURLStr)
+					}
+
+				// Milestone 33: SOUND(midiNote, duration, volume)
+				case ._soundOpCode:
+					let sndVolume  = execStack[execLevel];          execLevel -= 1
+					let sndDur     = execStack[execLevel];          execLevel -= 1
+					let sndNote    = Int(execStack[execLevel]);     execLevel -= 1
+					// Validate range
+					guard sndNote >= 0 && sndNote <= 127 else {
+						let sndErr = "Parser: MIDI note out of range [0-127]: \(sndNote)"
+						if let d = delegate { d.pscriptPrint(sndErr, newline: true) }
+						else { print(sndErr) }
+						break
+					}
+					let sndDurClamped = min(max(sndDur, 0.0), 10.0)
+					let sndVolClamped = min(max(sndVolume, 0.0), 1.0)
+					if let d = delegate {
+						d.pscriptSound(midiNote: sndNote,
+									   duration: sndDurClamped,
+									   volume:   sndVolClamped)
+					} else {
+						cliSound(midiNote: sndNote, duration: sndDurClamped, volume: sndVolClamped)
+					}
+
+				// Milestone 35: FILL(r, g, b, a) — set persistent text background colour
+				case ._fillOpCode:
+					let fillA = execStack[execLevel];     execLevel -= 1
+					let fillB = execStack[execLevel];     execLevel -= 1
+					let fillG = execStack[execLevel];     execLevel -= 1
+					let fillR = execStack[execLevel];     execLevel -= 1
+					let fr = min(max(fillR, 0.0), 1.0)
+					let fg = min(max(fillG, 0.0), 1.0)
+					let fb = min(max(fillB, 0.0), 1.0)
+					let fa = min(max(fillA, 0.0), 1.0)
+					gFillColor = (fr, fg, fb, fa)
+					delegate?.pscriptFill(r: fr, g: fg, b: fb, a: fa)
+
+				// Milestone 34: TEXT(r, g, b, a) — set persistent text foreground colour
+				case ._textColorOpCode:
+					let tcA = execStack[execLevel];     execLevel -= 1
+					let tcB = execStack[execLevel];     execLevel -= 1
+					let tcG = execStack[execLevel];     execLevel -= 1
+					let tcR = execStack[execLevel];     execLevel -= 1
+					let tr = min(max(tcR, 0.0), 1.0)
+					let tg = min(max(tcG, 0.0), 1.0)
+					let tb = min(max(tcB, 0.0), 1.0)
+					let ta = min(max(tcA, 0.0), 1.0)
+					gTextColor = (tr, tg, tb, ta)
+					delegate?.pscriptTextColor(r: tr, g: tg, b: tb, a: ta)
+
+				// Milestone 30: SPRITE(id, x, y, rotation, scale, hidden, alpha, imageURL)
+				// Bytecode: _spriteOpCode, presentMask, argCount
+				// presentMask: bit N set = argument N was supplied and is on the stack.
+				// Args are pushed in order (0=id first, 7=imageURL last) — pop in reverse.
+				// Absent args use defaults: x/y/rot/scale/alpha → sentinel, hidden → -1, imageURL → ""
+				case ._spriteOpCode:
+					execIndex += 1
+					let sprMask  = execCodeArray[execIndex]
+					execIndex += 1
+					let _        = execCodeArray[execIndex]   // argCount (unused here)
+					let sentinel30 = Double.greatestFiniteMagnitude
+
+					// Collect present args from stack into a fixed array indexed by slot.
+					// Stack order: id pushed first → deepest; imageURL pushed last → top.
+					// We pop from top (slot 7) down to slot 0.
+					var slotVal  = [Double](repeating: sentinel30, count: 8)
+					var slotSC   = [Int](repeating: 0, count: 8)
+					var slotSV   = [Int](repeating: 0, count: 8)
+
+					for slotIndex in stride(from: 7, through: 0, by: -1) {
+						guard (sprMask >> slotIndex) & 1 == 1 else { continue }
+						slotVal[slotIndex] = execStack[execLevel]
+						slotSC[slotIndex]  = execStringConsts[execLevel]
+						slotSV[slotIndex]  = execStringVars[execLevel]
+						execLevel -= 1
+					}
+
+					// Resolve imageURL (slot 7) — string or empty
+					var sprImageURL = ""
+					let urlRaw = slotVal[7]
+					if urlRaw == _stringConstMarker {
+						sprImageURL = gStringConstants[slotSC[7]]
+					} else if urlRaw == _stringVarMarker {
+						let vi = slotSV[7]
+						if vi == _tempArrayStringVarIndex { sprImageURL = gTempStringForArray }
+						else { let vn = gVarNames[vi]; let (v,_,_) = resolveVarRead(varName: vn); if let sv = v, case .string(let s) = sv { sprImageURL = s } }
+					}
+					// If slot 7 absent, sprImageURL stays ""
+					// Apply path resolution — emoji (@🛸) and empty strings pass through unchanged
+					if !sprImageURL.isEmpty && !sprImageURL.hasPrefix("@") {
+						sprImageURL = resolveBasPath(sprImageURL).path
+					}
+
+					// Resolve numeric slots (0=id, 1=x, 2=y, 3=rot, 4=scale, 5=hidden, 6=alpha)
+					let sprID       = Int(slotVal[0])
+					let sprX        = slotVal[1]   // sentinel if absent
+					let sprY        = slotVal[2]
+					let sprRotation = slotVal[3]
+					let sprScale    = slotVal[4]
+					let sprHiddenD  = slotVal[5]
+					let sprAlpha    = slotVal[6]
+					let sprHidden   = (sprMask >> 5) & 1 == 0 ? -1 : Int(sprHiddenD)
+
+					if let d = delegate {
+						d.pscriptSprite(id: sprID,
+										x: sprX, y: sprY,
+										rotation: sprRotation,
+										scale: sprScale,
+										hidden: sprHidden,
+										alpha: sprAlpha,
+										imageURL: sprImageURL)
+					}
+
+				// Milestone 30: GET(spriteID, x1, y1, x2, y2)
+				// Bytecode: _getOpCode, 5
+				// Stack push order: id, x1, y1, x2, y2  →  pop y2 first, id last.
+				case ._getOpCode:
+					execIndex += 1
+					let _ = execCodeArray[execIndex]   // argCount (always 5)
+					let getY2 = Int(execStack[execLevel]); execLevel -= 1
+					let getX2 = Int(execStack[execLevel]); execLevel -= 1
+					let getY1 = Int(execStack[execLevel]); execLevel -= 1
+					let getX1 = Int(execStack[execLevel]); execLevel -= 1
+					let getID = Int(execStack[execLevel]); execLevel -= 1
+					if let d = delegate {
+						d.pscriptSpriteGet(id: getID, x1: getX1, y1: getY1, x2: getX2, y2: getY2)
+					}
+				
 				default:
 					let errMsg5l = "Syntax Error: undefined opcode \(opcode) at line \(pc+1)"
 					print(errMsg5l); delegate?.pscriptPrint(errMsg5l, newline: true)
 					evalErr = true
 				}
-
+				
 				execIndex += 1
 			} // end innerLoop
 			
@@ -7510,6 +8985,7 @@ class parseEval: NSObject {
 		delegate?.pscriptExecutionDidEnd()
 	}
 }
+
 
 //--| REPL COMMANDS |-----
 
@@ -7571,6 +9047,37 @@ func parseLineRange(_ arg: String, count: Int) -> (start: Int, end: Int)? {
 	return nil   // malformed
 }
 
+/// Resolve a user-supplied file path to an absolute URL.
+/// Rules:
+///   1. Bare filename          → ~/Documents/pBasic/filename.bas
+///   2. relDir/filename        → ~/Documents/pBasic/relDir/filename.bas
+///   3. ~/...                  → expanded from NSHomeDirectory()
+///   4. /...                   → used as-is (absolute path)
+internal func resolveBasPath(_ input: String) -> URL {
+	let trimmed = input.trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
+	
+	if trimmed.hasPrefix("/") {
+		// Case 4: absolute path
+		return URL(fileURLWithPath: trimmed)
+	}
+	
+	if trimmed.hasPrefix("~/") {
+		// Case 3: home-relative
+		let expanded = NSHomeDirectory() + "/" + trimmed.dropFirst(2)
+		return URL(fileURLWithPath: expanded)
+	}
+	
+	// Cases 1 & 2: relative — anchor to ~/Documents/pBasic/
+	let fm = FileManager.default
+	let docsURL = fm.urls(for: .documentDirectory,
+						  in: .userDomainMask).first
+				  ?? URL(fileURLWithPath: NSHomeDirectory() + "/Documents")
+	return docsURL
+		.appendingPathComponent("pBasic")
+		.appendingPathComponent(trimmed)
+}
+
+
 func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, delegate: PScriptDelegate? = nil) -> Bool {
 	
 	// pBasic Step 2: single emit helper — routes to delegate output when
@@ -7591,7 +9098,7 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 		moreLineCount = 0
 
 		// Show the prompt (no newline — keeps cursor on the same line for overwrite)
-		let morePrompt = " —————| Space to Continue • CTRL-C to Break |————— "
+		let morePrompt = " —————• Space to Continue • CTRL-C to Break •————— "
 		delegate?.pscriptPrintSync(morePrompt)
 		
 		// Wait for Space / RET / CTRL-C
@@ -7712,25 +9219,18 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 	}
 	
 	if upper.hasPrefix("LOAD ") {
-		let filename = String(trimmed.dropFirst(5)).trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
-		
+		let arg        = String(trimmed.dropFirst(5))
+		let fileURL    = resolveBasPath(arg)
 		let fileManager = FileManager.default
-		guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-			emit("Error: Could not access Documents directory")
-			return true
-		}
-		
-		let fileURL = documentsURL.appendingPathComponent(filename)
-		
+
 		guard fileManager.fileExists(atPath: fileURL.path) else {
-			emit("Error: File '\(filename)' not found in Documents directory")
-			emit("Path: \(fileURL.path)")
+			emit("Error: File not found: \(fileURL.path)")
 			return true
 		}
-		
+
 		do {
 			let contents = try String(contentsOf: fileURL, encoding: .utf8)
-			
+
 			gProgramLines.removeAll()
 			gVariables.removeAll()
 			gVariableTypes.removeAll()
@@ -7739,9 +9239,9 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 			gWhilePairs.removeAll()
 			gWhileEnds.removeAll()
 			gWhileLoopStack.removeAll()
-			gArrayDimensions.removeAll()   // Milestone 23
+			gArrayDimensions.removeAll()
 			timerOff()
-			
+
 			let lines = contents.components(separatedBy: .newlines)
 			for line in lines {
 				let trimmedLine = line.trimmingCharacters(in: .whitespaces)
@@ -7749,42 +9249,48 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 					gProgramLines.append(trimmedLine)
 				}
 			}
-			
-			// Remember the full path so EDIT can open it later
-				gLastLoadedFilePath = fileURL.path
-				emit("Loaded \(gProgramLines.count) lines from \(filename)")
-			} catch {
-				emit("Error loading file: \(error.localizedDescription)")
-			}
-			
-			return true
+
+			gLastLoadedFilePath = fileURL.path
+			// Display a tilde-shortened path for readability
+			let displayPath = fileURL.path.replacingOccurrences(
+				of: NSHomeDirectory(), with: "~")
+			emit("Loaded \(gProgramLines.count) lines from \(displayPath)")
+		} catch {
+			emit("Error loading file: \(error.localizedDescription)")
 		}
+
+		return true
+	}
 	
 	if upper.hasPrefix("SAVE ") {
-		let filename = String(trimmed.dropFirst(5)).trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
-		
+		let arg     = String(trimmed.dropFirst(5))
+		let fileURL = resolveBasPath(arg)
+
 		if gProgramLines.isEmpty {
 			emit("Error: No program to save")
 			return true
 		}
-		
-		let fileManager = FileManager.default
-		guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-			emit("Error: Could not access Documents directory")
-			return true
-		}
-		
-		let fileURL = documentsURL.appendingPathComponent(filename)
+
+		// Create intermediate directories if needed
+		// (e.g. SAVE myProjects/newFile.bas creates ~/Documents/pBasic/myProjects/)
+		let dirURL = fileURL.deletingLastPathComponent()
+		try? FileManager.default.createDirectory(
+			at: dirURL,
+			withIntermediateDirectories: true)
+
 		let contents = gProgramLines.joined(separator: "\n") + "\n"
-		
+
 		do {
 			try contents.write(to: fileURL, atomically: true, encoding: .utf8)
-			emit("Saved \(gProgramLines.count) lines to \(filename)")
-			emit("Path: \(fileURL.path)")
+			gLastLoadedFilePath = fileURL.path
+			gLastSaveFilePath   = fileURL.path
+			let displayPath = fileURL.path.replacingOccurrences(
+				of: NSHomeDirectory(), with: "~")
+			emit("Saved \(gProgramLines.count) lines to \(displayPath)")
 		} catch {
 			emit("Error saving file: \(error.localizedDescription)")
 		}
-		
+
 		return true
 	}
 	
@@ -7851,7 +9357,7 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 	}
 	
 	if upper == "HELP" {
-		pagedEmit("pScript 0.8.40 \u{2022} Copyright 2026 John Roland Penner")
+		pagedEmit("pScript 0.9.59 \u{2022} Copyright 2026 John Roland Penner")
 		pagedEmit("")
 		pagedEmit("REPL Commands:")
 		pagedEmit("  NEW, DIR, LOAD, SAVE, LIST, EDIT, RUN, CLS, CLR, EXIT")
@@ -7866,16 +9372,17 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 		pagedEmit("Keywords:")
 		pagedEmit("  VAR name : Type = value    (Types: Int, Float, String, Bool)")
 		pagedEmit("  VAR myArray[200,3] : Float (Multi-Dimensional Arrays supported)")
-		pagedEmit("  CLS, CLR, BUFFER, TAB(n), LEN(), MID$(), LOCATE(row,col) ")
-		pagedEmit("  PRINT expression; or expression       (; suppresses newline)")
-		pagedEmit("      Concatenate Multiple Strings with + ")
+		pagedEmit("  CLS, CLR, BUFFER, TAB(n), LOCATE(row,col) ")
+		pagedEmit("  PRINT expression or expression;      (; suppresses newline)")
+		pagedEmit("     Concatenate Multiple Strings with + STR$(n)")
 		pagedEmit("  INPUT var or INPUT \"prompt\"; var")
-		pagedEmit("      Supports Piped Input from Terminal. ")
-		pagedEmit("      e.g. echo \"John\" | pscript yourname.bas")
+		pagedEmit("     Supports Piped Input from Terminal. ")
+		pagedEmit("     e.g. echo \"John\" | pscript yourname.bas")
 		pagedEmit("")
 		pagedEmit("Flow Control: FOR, TO, STEP, NEXT, IF, THEN")
 		pagedEmit("  FOR var = start TO end [STEP n] ... NEXT var")
 		pagedEmit("  IF condition THEN statement")
+		pagedEmit("  IF (condition) { one statement per line }")
 		pagedEmit("  WHILE (condition) { ... }")
 		pagedEmit("  END, EXIT (to shell)")
 		pagedEmit("")
@@ -7889,12 +9396,46 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 		pagedEmit("      myVal = myFunc(arg1, arg2)")
 		pagedEmit("  Recursive calls supported.")
 		pagedEmit("")
+		pagedEmit("String Handling:") 
+		pagedEmit("")
+		pagedEmit("  MID$(a$, index, size) — Returns Sub-String of a$")
+		pagedEmit("     starting at INDEX, SIZE characters in length. ")
+		pagedEmit("")
+		pagedEmit("  LEN(a$) — Returns length of a$")
+		pagedEmit("     If a string array: LEN(myArray[]) is specified,") 
+		pagedEmit("     then it returns number of non-empty array elements.") 
+		pagedEmit("")
+		pagedEmit("  STRING$(n,a$)  Returns a String of n Strings.")
+		pagedEmit("     e.g. b$ = string$(8, \"- \")produces: ")
+		pagedEmit("     b$ == \"- - - - - - - -\" . Any string") 
+		pagedEmit("     longer than 1024 chars gets truncated.") 
+		pagedEmit("")
+		pagedEmit("  INSTR(startAt, haystack$, needle$)  Returns Position of       ⚡️")
+		pagedEmit("     needle$ in haystack$ Result is 0-based as INT. ")
+		pagedEmit("     pos1 = INSTR(0, string, str) ")
+		pagedEmit("     pos2 = INSTR(pos1+1, string, str) ")
+		pagedEmit("")
+		pagedEmit("  SORT [-rev] names[0]  Sort: var names[3]         ⚡️")
+		pagedEmit("     types: String | Int | Float. Strings Sort ")
+		pagedEmit("     Alphabetically; Numbers Sort Ascendingly. ")
+		pagedEmit("     The -rev parameter Reverses Sort. ")
+		pagedEmit("")
+		pagedEmit("  SORTLEN [-rev] names[0]                          ⚡️")
+		pagedEmit("     Sort Strings (ONLY Strings) by Length. ")
+		pagedEmit("     With -rev parameter, returns Reversed Sort. ") 
+		pagedEmit("")
+		pagedEmit("Serial Communications:")
+		pagedEmit("  TERM ON | OFF — Enable Disable Serial Port")
+		pagedEmit("  SERIALIN a$ — Receives Serial Input ")
+		pagedEmit("  SERIALOUT b$ — Sends String to Serial Output ")
+		pagedEmit("")
 		pagedEmit("File Handling:")
 		pagedEmit("  Text files are read as an Array of Strings: ")
 		pagedEmit("  var fileLines[255] : String")
 		pagedEmit("  var a$ : String = \"inFile.txt\"")
 		pagedEmit("  var b$ : String = \"outFile.txt\"")
 		pagedEmit("  fileLines[] = LOAD(a$)")
+		pagedEmit("  var lineCount = LEN(fileLines[])")
 		pagedEmit("  SAVE b$, fileLines[]")
 		pagedEmit("")
 		pagedEmit("Timer:")
@@ -7905,7 +9446,16 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 		pagedEmit("  Timer auto-stops on END, runtime error, or program completion.")
 		pagedEmit("  NOTE: FUNC() in Timer Calls can NOT pass variables; use Globals.")
 		pagedEmit("")
-		pagedEmit("Sprites:")
+		pagedEmit("Graphics:")
+		pagedEmit("  POINT(x, y, R, G, B, A)")
+		pagedEmit("  LINE (x1, y1, x2, y2, R, G, B, A)")
+		pagedEmit("  CIRCLE(x, y, radius)")
+		pagedEmit("  RECT(x1, y1, x2, y2)")
+		pagedEmit("  ROUNDRECT(x1, y1, x2, y2, cornerRadius)")
+		pagedEmit("  STAMP(x1, y1, spriteID)")
+		pagedEmit("  CLONE(ID, x1,y1,x2,y2)")
+		pagedEmit("")
+		pagedEmit("Sprites and Sound:")
 		pagedEmit("  SPRITE(id, x, y, rotation, scale, hidden, alpha, imageURL)")
 		pagedEmit("      Create or update Sprites. Comma syntax — any argument ")
 		pagedEmit("      except id may be omitted. Emoji textures: imageURL = \"@🛸\" ")
@@ -7915,12 +9465,24 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 		pagedEmit("    Move Sprite: SPRITE(1, shipX, shipY, shipRot, , , , ) ")
 		pagedEmit("    Hide Sprite: SPRITE(1, , , , , 0, , ) ")
 		pagedEmit("")
+		pagedEmit("  SAY \"hello\"        // text-to-speech, non-blocking, queues utterances")
+		pagedEmit("  SAY STOP           // halt speech immediately")
+		pagedEmit("  MEOW               // Emits a Cat Meow 😼")
+		pagedEmit("")
+		pagedEmit("  PLAY(ID, volume, soundURL)")
+		pagedEmit("     PLAY(1, 1.0, \"pBasic/Laser.wav\")  (load Sound)")
+		pagedEmit("     PLAY(1)                             (play Sound)")
+		pagedEmit("")
+		pagedEmit("  SOUND(MIDI, duration, volume)  // Midi Note, Seconds, Volume")
+		pagedEmit("     SOUND(69, 0.5, 1.0)         // A4, half second, full volume")
+		pagedEmit("     SOUND(60, 0.25, 0.8)        // Middle C, quarter second, 80%")
+		pagedEmit("")
 		pagedEmit("Operators:")
 		pagedEmit("  Math: + - * / ^ %    Comparison: == <> > < >= <=")
 		pagedEmit("  Boolean: && || ^^ !  Logical Compare: AND OR XOR NOT")
 		pagedEmit("")
 		pagedEmit("Math Functions:")
-		pagedEmit("  SIN COS TAN ATAN SQRT SQR DIST EXP LOG LOG10 ABS INT RND")
+		pagedEmit("  SIN COS TAN ATAN √SQRT SQR² DIST EXP LOG LOG10 ABS INT RND")
 		pagedEmit("  LEN() MID$() VAL(str) STR$(exp) CHR$(num) ASC(str)")
 		pagedEmit("  Constants: PI, DATE, TIME, INKEY$ == ^U ^D ^L ^R ")
 		pagedEmit("")
@@ -7955,28 +9517,14 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 	if upper == "DIR" || upper.hasPrefix("DIR ") {
 		let fileManager = FileManager.default
 		var targetPath: String
-
+		
 		if upper == "DIR" {
-			guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-				emit("Error: Could not access Documents directory")
-				return true
-			}
-			targetPath = documentsURL.path
+			// Bare DIR → show ~/Documents/pBasic/
+			targetPath = resolveBasPath("").path
 		} else {
-			let argument = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-
-			if argument.hasPrefix("~/") {
-				let relativePath = String(argument.dropFirst(2))
-				targetPath = (NSHomeDirectory() as NSString).appendingPathComponent(relativePath)
-			} else if argument.hasPrefix("/") {
-				targetPath = argument
-			} else {
-				guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-					emit("Error: Could not access Documents directory")
-					return true
-				}
-				targetPath = documentsURL.appendingPathComponent(argument).path
-			}
+			let argument = String(trimmed.dropFirst(3))
+				.trimmingCharacters(in: .whitespaces)
+			targetPath = resolveBasPath(argument).path
 		}
 
 		var isDirectory: ObjCBool = false
@@ -8311,6 +9859,254 @@ func cliSound(midiNote: Int, duration: Double, volume: Double) {
 }
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: — CLI Serial Manager (M59)
+// Mirrors SerialManager from ContentView.swift using pure POSIX calls.
+// No GUI dependencies — compiles and runs in pscript CLI.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// File descriptor of the open serial port. -1 = not connected.
+var gCliSerialFD: Int32 = -1
+
+/// Self-pipe used to unblock poll() on disconnect. [read, write]
+var gCliSerialPipe: [Int32] = [-1, -1]
+
+/// Whether the CLI serial port is currently open.
+var gCliSerialConnected: Bool = false
+
+/// Receive buffer — bytes appended by the read thread, drained by pscriptSerialIn().
+var gCliSerialBuffer: String = ""
+
+/// Lock protecting gCliSerialBuffer.
+var gCliSerialLock: NSLock = NSLock()
+
+/// The read thread.
+var gCliSerialThread: Thread? = nil
+
+/// Find the first available USB-serial port. Same logic as SerialManager.findSerialPort().
+func cliSerialFindPort() -> String? {
+	let candidates = [
+		"/dev/cu.usbserial",
+		"/dev/cu.PL2303",
+		"/dev/cu.SLAB_USBtoUART",
+		"/dev/cu.wchusbserial",
+	]
+	let devDir = "/dev"
+	guard let entries = try? FileManager.default.contentsOfDirectory(atPath: devDir) else {
+		return nil
+	}
+	let cuEntries = entries
+		.filter { $0.hasPrefix("cu.") }
+		.map    { "\(devDir)/\($0)" }
+		.sorted()
+	for prefix in candidates {
+		if let match = cuEntries.first(where: { $0.hasPrefix(prefix) }) {
+			return match
+		}
+	}
+	return cuEntries.first { $0.contains("usb") || $0.contains("USB") }
+}
+
+/// Configure the tty for 9600-8N1 raw mode. Same settings as SerialManager.configureTTY().
+@discardableResult
+func cliSerialConfigureTTY(_ fd: Int32) -> Bool {
+	var tios = termios()
+	guard tcgetattr(fd, &tios) == 0 else { return false }
+
+	// Raw mode — no echo, no canonical, no signals
+	cfmakeraw(&tios)
+
+	// 9600 baud
+	cfsetispeed(&tios, speed_t(B9600))
+	cfsetospeed(&tios, speed_t(B9600))
+
+	// 8N1
+	tios.c_cflag &= ~UInt(PARENB)   // no parity
+	tios.c_cflag &= ~UInt(CSTOPB)   // 1 stop bit
+	tios.c_cflag &= ~UInt(CSIZE)
+	tios.c_cflag |=  UInt(CS8)      // 8 data bits
+	tios.c_cflag |=  UInt(CLOCAL | CREAD)
+
+	// No hardware flow control
+	tios.c_cflag &= ~UInt(CRTSCTS)
+
+	// VMIN=0 VTIME=10 — non-blocking with 1s timeout
+	//tios.c_cc.16 = 0    // VMIN
+	//tios.c_cc.17 = 10   // VTIME (tenths of seconds)
+	withUnsafeMutableBytes(of: &tios.c_cc) { ptr in
+		ptr[Int(VMIN)]  = 0
+		ptr[Int(VTIME)] = 10
+	}
+
+	return tcsetattr(fd, TCSANOW, &tios) == 0
+}
+
+/// Read loop — runs on a dedicated Thread, mirrors SerialManager.readLoop().
+func cliSerialReadLoop() {
+	var buf = [UInt8](repeating: 0, count: 256)
+	while gCliSerialConnected {
+		let serialFD = gCliSerialFD
+		let pipeFD   = gCliSerialPipe[0]
+		guard serialFD >= 0, pipeFD >= 0 else { break }
+
+		var fds = (
+			pollfd(fd: serialFD, events: Int16(POLLIN), revents: 0),
+			pollfd(fd: pipeFD,   events: Int16(POLLIN), revents: 0)
+		)
+		let ready = withUnsafeMutableBytes(of: &fds) { ptr -> Int32 in
+			let pfds = ptr.baseAddress!.assumingMemoryBound(to: pollfd.self)
+			return poll(pfds, 2, 500)
+		}
+		if ready < 0 {
+			if errno == EINTR { continue }
+			break
+		}
+		if ready == 0 { continue }
+
+		// Check pipe — means cliSerialDisconnect() was called
+		let pipeReady = withUnsafeBytes(of: &fds) { ptr -> Bool in
+			let pfds = ptr.baseAddress!.assumingMemoryBound(to: pollfd.self)
+			return (pfds[1].revents & Int16(POLLIN)) != 0
+		}
+		if pipeReady { break }
+
+		// Check serial fd
+		let serialReady = withUnsafeBytes(of: &fds) { ptr -> Bool in
+			let pfds = ptr.baseAddress!.assumingMemoryBound(to: pollfd.self)
+			return (pfds[0].revents & Int16(POLLIN)) != 0
+		}
+		guard serialReady else { continue }
+
+		let n = read(serialFD, &buf, buf.count)
+		if n > 0 {
+			if let str = String(bytes: buf[0..<n], encoding: .utf8) {
+				gCliSerialLock.lock()
+				gCliSerialBuffer += str
+				gCliSerialLock.unlock()
+			}
+		} else if n < 0 && errno != EINTR && errno != EAGAIN {
+			print("pScript serial: read error — disconnecting")
+			cliSerialDisconnect()
+			break
+		}
+	}
+}
+
+/// Connect to the first available USB-serial port.
+func cliSerialConnect() {
+	guard !gCliSerialConnected else {
+		print("pScript serial: already connected")
+		return
+	}
+	guard let path = cliSerialFindPort() else {
+		print("pScript serial: no USB-serial port found")
+		return
+	}
+	let fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
+	guard fd >= 0 else {
+		print("pScript serial: could not open \(path) — \(String(cString: strerror(errno)))")
+		return
+	}
+	// Clear O_NONBLOCK
+	var flags = fcntl(fd, F_GETFL, 0)
+	flags &= ~O_NONBLOCK
+	fcntl(fd, F_SETFL, flags)
+
+	guard cliSerialConfigureTTY(fd) else {
+		print("pScript serial: could not configure \(path)")
+		close(fd)
+		return
+	}
+
+	// Create self-pipe
+	var fds: [Int32] = [-1, -1]
+	guard pipe(&fds) == 0 else {
+		print("pScript serial: pipe() failed")
+		close(fd)
+		return
+	}
+	gCliSerialPipe = fds
+	gCliSerialFD = fd
+	gCliSerialConnected = true
+	gCliSerialBuffer = ""
+	print("pScript serial: connected to \(path) at 9600 baud")
+
+	// Start read thread
+	let thread = Thread { cliSerialReadLoop() }
+	thread.name = "pscript.serial.read"
+	thread.qualityOfService = .userInitiated
+	thread.start()
+	gCliSerialThread = thread
+}
+
+/// Disconnect and clean up.
+func cliSerialDisconnect() {
+	guard gCliSerialConnected else { return }
+	gCliSerialConnected = false
+
+	// Wake the read thread via pipe
+	if gCliSerialPipe[1] >= 0 {
+		var byte: UInt8 = 0x01
+		_ = write(gCliSerialPipe[1], &byte, 1)
+	}
+	// Wait up to 500ms for read thread to exit
+	var waited = 0
+	while gCliSerialThread?.isExecuting == true && waited < 500 {
+		Thread.sleep(forTimeInterval: 0.01)
+		waited += 10
+	}
+	if gCliSerialFD >= 0 { close(gCliSerialFD); gCliSerialFD = -1 }
+	if gCliSerialPipe[0] >= 0 { close(gCliSerialPipe[0]); gCliSerialPipe[0] = -1 }
+	if gCliSerialPipe[1] >= 0 { close(gCliSerialPipe[1]); gCliSerialPipe[1] = -1 }
+	print("pScript serial: disconnected")
+}
+
+/// Send data over the serial port.
+func cliSerialSend(_ text: String, newline: Bool) {
+	guard gCliSerialConnected, gCliSerialFD >= 0 else { return }
+	let out = newline ? text + "\r\n" : text
+	guard let data = out.data(using: .utf8) else { return }
+	data.withUnsafeBytes { ptr in
+		guard let base = ptr.baseAddress else { return }
+		var remaining = data.count
+		var offset = 0
+		while remaining > 0 {
+			let written = write(gCliSerialFD, base.advanced(by: offset), remaining)
+			if written < 0 { break }
+			offset += written
+			remaining -= written
+		}
+	}
+}
+
+/// Block until a complete line arrives from the serial port, or break is requested.
+func cliSerialReceiveLine() -> String {
+	while true {
+		// Check for break
+		if gBreakRequested { return "" }
+
+		// Check buffer for a complete line
+		gCliSerialLock.lock()
+		let buf = gCliSerialBuffer
+		gCliSerialLock.unlock()
+
+		if let range = buf.range(of: "\n") ?? buf.range(of: "\r") {
+			let line = String(buf[buf.startIndex..<range.lowerBound])
+				.trimmingCharacters(in: .whitespacesAndNewlines)
+				.trimmingCharacters(in: .controlCharacters)
+			gCliSerialLock.lock()
+			// Remove the consumed line + terminator from the buffer
+			let afterRange = buf.index(after: range.lowerBound)
+			gCliSerialBuffer = String(buf[afterRange...])
+			gCliSerialLock.unlock()
+			return line
+		}
+		Thread.sleep(forTimeInterval: 0.02)
+	}
+}
+
+
+// MARK: — CLI PRINT Command
 final class CLIDelegate: PScriptDelegate {
 
 	func pscriptPrint(_ text: String, newline: Bool) {
@@ -8359,7 +10155,23 @@ final class CLIDelegate: PScriptDelegate {
 					 r: Double, g: Double, b: Double, a: Double) {
 		// Graphics not supported in CLI — silently ignored
 	}
-
+	
+	func pscriptCircle(x: Int, y: Int, radius: Int,
+					  fillR: Double, fillG: Double, fillB: Double, fillA: Double,
+					  strokeR: Double, strokeG: Double, strokeB: Double, strokeA: Double, penSize: Double) { }
+	func pscriptRect(x1: Int, y1: Int, x2: Int, y2: Int,
+					 fillR: Double, fillG: Double, fillB: Double, fillA: Double,
+					 strokeR: Double, strokeG: Double, strokeB: Double, strokeA: Double, penSize: Double) { }
+	func pscriptRoundRect(x1: Int, y1: Int, x2: Int, y2: Int, radius: Int,
+					  fillR: Double, fillG: Double, fillB: Double, fillA: Double,
+					  strokeR: Double, strokeG: Double, strokeB: Double, strokeA: Double, penSize: Double) { }
+	
+	func pscriptStamp(x: Int, y: Int, spriteID: Int) { }
+	
+	func pscriptFlood(x: Int, y: Int, r: Double, g: Double, b: Double, a: Double) { }
+	
+	func pscriptClone(id: Int, x1: Int, y1: Int, x2: Int, y2: Int) { }
+	
 	func pscriptClr() {
 		// Graphics not supported in CLI — silently ignored
 	}
@@ -8382,6 +10194,28 @@ final class CLIDelegate: PScriptDelegate {
 	
 	func pscriptTimerDidStart() {}
 	func pscriptTimerDidStop()  {}
+	
+	func pscriptSerialConnect() {
+		cliSerialConnect()
+	}
+
+	func pscriptSerialDisconnect() {
+		cliSerialDisconnect()
+	}
+
+	func pscriptSerialOut(_ text: String, newline: Bool) {
+		cliSerialSend(text, newline: newline)
+	}
+
+	func pscriptSerialIn() -> String {
+		if !gCliSerialConnected {
+			// Fall back to stdin when not connected — useful for testing
+			if gStdinIsPiped { return "" }
+			return readLine() ?? ""
+		}
+		return cliSerialReceiveLine()
+	}
+	
 	func pscriptPenSize(_ size: Double) {}				// CLI: graphics not supported — no-op
 	func pscriptBuffer(drawTo: Int, display: Int) {}	// CLI: graphics not supported — no-op
 	func pscriptSample(x: Int, y: Int, channel: Int, sampleSize: Double) -> Double { return 0.0 }
@@ -8419,6 +10253,9 @@ final class CLIDelegate: PScriptDelegate {
 	}
 	func pscriptSound(midiNote: Int, duration: Double, volume: Double) {
 		cliSound(midiNote: midiNote, duration: duration, volume: volume)
+	}
+	func pscriptMeow() {
+		// CLI: bundle sounds not available — no-op
 	}
 	func pscriptFill(r: Double, g: Double, b: Double, a: Double) {
 		// CLI: text background not supported — no-op
@@ -8561,7 +10398,7 @@ func pScriptMain() {
 	// Interactive REPL mode
 	if !startedFromFile {
 		// Only show banner if starting interactively (not from file)
-		print("pScript v0.8.40 \u{2022} Copyright 2026 John Roland Penner")
+		print("pScript v0.9.59 \u{2022} Copyright 2026 John Roland Penner")
 		print("Type HELP for Commands and Expressions.")
 		print()
 	}
@@ -8622,4 +10459,3 @@ pScriptMain()
 #endif
 // Compile: swiftc -o pscript parseEval.swift
 // Run: ./pscript
-

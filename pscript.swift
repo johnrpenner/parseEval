@@ -1,7 +1,7 @@
 // parseEval.swift
-// pScript v0.9.59 - Copyright 2026 by John Roland Penner
+// pScript v0.9.60 - Copyright 2026 by John Roland Penner
 // Based on Recursive Descent Parser by Robert Purves (2008)
-// Last Updated: May 29, 2026
+// Last Updated: June 17, 2026
 // 
 // Milestone 8: FUNCTIONS | func definitions, local scope, return values, recursion
 // Milestone 12: TIMER with INKEY$
@@ -68,14 +68,14 @@ import Foundation
 import AVFoundation
 
 // Milestone 22: Version string — update only after full test/validate cycle
-let pScriptVersion: String = "pScript 0.9.59 • ©2026 by John Roland Penner"
+let pScriptVersion: String = "pScript 0.9.60 • ©2026 by John Roland Penner"
 
 //---| GLOBALS |-------
 
 // Parse setup values
-let _maxNumConsts: Int = 500
-let _maxNumSymbols: Int = 200
-let _maxCodeLength: Int = 1000
+let _maxNumConsts: Int = 2048
+let _maxNumSymbols: Int = 256
+let _maxCodeLength: Int = 1024
 let _maxEvalStackSize: Int = 50
 let _spaceChar: String = " "
 
@@ -640,6 +640,7 @@ struct CallFrame {
 	// corrupt outer WHILE loops — each call frame gets a clean WHILE stack)
 	var savedWhileLoopStack: [WhileLoopInfo]
 	var arrayParamMap: [String: String]   			// local param name → caller's global array name
+	var savedStrConstsWatermark: Int				// prevent String Constant Pool from overflow during Eval
 }
 
 // Global function definition table (populated during pre-scan)
@@ -5580,13 +5581,7 @@ class parseEval: NSObject {
 			// Milestone 10: WHILE loop
 			case "WHILE":
 				return parseWhileStatement()
-				// Milestone 19: Double-buffering
-				// Syntax:
-				//   BUFFER    — toggle: swap draw and display buffers
-				//   BUFFER:0  — draw to buffer 0, display buffer 1
-				//   BUFFER:1  — draw to buffer 1, display buffer 0
-				// Emits: _bufferOpCode, drawTo, displayBuf
-				// drawTo = -1 and displayBuf = -1 means "toggle at runtime"
+			
 			case "BREAK": 
 				plantCode(code: evalOPcodes._breakOpCode.rawValue)
 				return true
@@ -5597,6 +5592,13 @@ class parseEval: NSObject {
 			case "SORTLEN": 
 				return parseSortStatement(opcode: ._sortLenOpCode)
 			
+			// Milestone 19: Double-buffering
+			// Syntax:
+			//   BUFFER    — toggle: swap draw and display buffers
+			//   BUFFER:0  — draw to buffer 0, display buffer 1
+			//   BUFFER:1  — draw to buffer 1, display buffer 0
+			// Emits: _bufferOpCode, drawTo, displayBuf
+			// drawTo = -1 and displayBuf = -1 means "toggle at runtime"
 			case "BUFFER":
 				var bufDrawTo  = -1   // -1 = toggle sentinel
 				var bufDisplay = -1
@@ -6606,7 +6608,7 @@ class parseEval: NSObject {
 
 				// The opening { may be on the same line (after ')') or on the next line
 				rest = String(rest[rest.index(after: parenClose)...]).trimmingCharacters(in: .whitespaces)
-
+				
 				var bodyStart: Int
 				if rest.hasPrefix("{") {
 					// Opening brace on same line as func header
@@ -6657,7 +6659,8 @@ class parseEval: NSObject {
 			i += 1
 		}
 	}
-
+	
+	
 	// Milestone 39: Unified brace block pre-scanner.
 	// Replaces preScanWhileLoops(). Populates all four tables in one pass:
 	//   gWhilePairs / gWhileEnds  — WHILE line ↔ closing } line
@@ -6899,6 +6902,7 @@ class parseEval: NSObject {
 				execStack = [Double](repeating: 0.0, count: _maxEvalStackSize)
 				execStringConsts = [Int](repeating: 0, count: _maxEvalStackSize)
 				execStringVars   = [Int](repeating: 0, count: _maxEvalStackSize)
+				
 				// sync global string refs to exec arrays
 				for i in 0..<_maxEvalStackSize {
 					execStringConsts[i] = gStringConstRefs[i]
@@ -6911,14 +6915,17 @@ class parseEval: NSObject {
 		
 		// ---- Main execution loop ----
 		guard loadNextLine() else { return }
-
+		
 		lineLoop: while true {
 			// Keep executing opcodes on the current line.
 			// codeLength is re-read inside the loop condition so that when _returnOpCode
 			// switches execCodeArray to the calling line mid-execution, the loop
 			// correctly continues with the new line's length rather than the old one.
 			var evalErr = false
-
+			
+			// Avoids Exhausting String Pool wwhen created during Evaluation
+			var preLineStrConsts = gNumStringConsts
+			
 			innerLoop: while execIndex <= execCodeArray[0] && !evalErr {
 				
 				// CTRL+C / BREAK check — one Bool read per opcode, negligible cost.
@@ -8010,7 +8017,8 @@ class parseEval: NSObject {
 						savedStringVarRefs:   Array(execStringVars),
 						savedForLoopStack: gForLoopStack,
 						savedWhileLoopStack: gWhileLoopStack,
-						arrayParamMap: arrayParamMap			// M58: array pass-by-reference map
+						arrayParamMap: arrayParamMap,			// M58: array pass-by-reference map
+						savedStrConstsWatermark: preLineStrConsts
 					)
 					gCallStack.append(frame)
 					gForLoopStack.removeAll()
@@ -8059,7 +8067,10 @@ class parseEval: NSObject {
 						gStringConstRefs[i] = execStringConsts[i]
 						gStringVarRefs[i]   = execStringVars[i]
 					}
-
+					
+					// this prevents String Constants from Overflowing
+					preLineStrConsts = done.savedStrConstsWatermark
+					
 					// Push return value at savedStackLevel + 1
 					execLevel = done.savedStackLevel + 1
 					if retIsStr {
@@ -8976,6 +8987,13 @@ class parseEval: NSObject {
 				return
 			}
 			
+			// Truncate string constant pool back to pre-line watermark. 
+			// Safe because _storeVarOpCode copies string values into gVariables
+			// by value — the gStringConstants slot is dead after assignment.
+			// This prevents unbounded pool growth in loops that call string
+			// functions (MID$, STR$, TIME, etc.) at high frequency.
+			gNumStringConsts = preLineStrConsts
+			
 			pc += 1
 			guard loadNextLine() else { break lineLoop }
 		} // end lineLoop
@@ -9270,7 +9288,7 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 			emit("Error: No program to save")
 			return true
 		}
-
+		
 		// Create intermediate directories if needed
 		// (e.g. SAVE myProjects/newFile.bas creates ~/Documents/pBasic/myProjects/)
 		let dirURL = fileURL.deletingLastPathComponent()
@@ -9357,7 +9375,7 @@ func processReplCommand(_ input: String, output: ((String) -> Void)? = nil, dele
 	}
 	
 	if upper == "HELP" {
-		pagedEmit("pScript 0.9.59 \u{2022} Copyright 2026 John Roland Penner")
+		pagedEmit("pScript 0.9.60 \u{2022} Copyright 2026 John Roland Penner")
 		pagedEmit("")
 		pagedEmit("REPL Commands:")
 		pagedEmit("  NEW, DIR, LOAD, SAVE, LIST, EDIT, RUN, CLS, CLR, EXIT")
@@ -10398,7 +10416,7 @@ func pScriptMain() {
 	// Interactive REPL mode
 	if !startedFromFile {
 		// Only show banner if starting interactively (not from file)
-		print("pScript v0.9.59 \u{2022} Copyright 2026 John Roland Penner")
+		print("pScript v0.9.60 \u{2022} Copyright 2026 John Roland Penner")
 		print("Type HELP for Commands and Expressions.")
 		print()
 	}
@@ -10459,3 +10477,4 @@ pScriptMain()
 #endif
 // Compile: swiftc -o pscript parseEval.swift
 // Run: ./pscript
+

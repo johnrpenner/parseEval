@@ -1,6 +1,6 @@
-// pScript 0.9.59 • Copyright 2026 by John Roland Penner
+// pScript 0.9.60 • Copyright 2026 by John Roland Penner
 // Based on a Recursive Descent Parser based by Robert Purves (2008)
-// Released May 31, 2026
+// Released June 18, 2026 
 
 	Look, a computer needs Instructions. 
 	Put things in its memory, 

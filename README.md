@@ -2,6 +2,22 @@
 // Based on a Recursive Descent Parser based by Robert Purves (2008)
 // Released June 18, 2026 
 
+
+pBasic for macOS https://apps.apple.com/ca/app/pbasic/id6789459761?mt=12
+pBasic is the full commercial package available on the App Store. 
+
+pScript is a subset for the macOS Terminal. it allows you to run pBasic code in a shell (without all the graphics animation support). 
+
+you insall pScript using Brew: 
+
+   🍺 BREW INSTALL
+    brew tap johnrpenner/tap
+    brew install johnrpenner/tap/pscript
+
+
+-- 
+HISTORY OF BASIC
+
 	Look, a computer needs Instructions. 
 	Put things in its memory, 
 	tell it where to get something, 
@@ -11,8 +27,6 @@
 	
 	(Vincent Grant McDonell, PhD)
 
-
-HISTORY OF BASIC
 
 pBasic is a modern BASIC, which gets rid of the retro PEEK and POKE, and punched-card era statements like GOTO -- replacing them with SOUND, SPRITE, and FUNCTIONS. 
 
